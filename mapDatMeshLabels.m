@@ -16,6 +16,17 @@ function [mappedTargetLabels, info] = mapDatMeshLabels(inputDatFile, targetDatFi
 %                        input labels.
 %       'NewLabels'      New target labels for each selected input label.
 %                        Default: max(existing target label) + 1, +2, ...
+%       'TargetLabelNames'
+%                        Names for the existing target labels, in sorted
+%                        label order. Used in logs and plots.
+%       'InputLabelNames'
+%                        Names for selected input labels, in InputLabels
+%                        order. Used in the remap log.
+%       'NewLabelNames'  Names for each new output label, in NewLabels
+%                        order. When omitted, default names are generated.
+%       'PromptForNewLabelNames'
+%                        Prompt in the MATLAB Command Window for missing
+%                        new label names. Default: false.
 %       'OutputDatFile'  Name/path for the remapped .dat file. Default:
 %                        <target name>_mapped.dat.
 %       'LogFile'        Name/path for the label mapping log. Default:
@@ -30,6 +41,10 @@ addRequired(parser, 'targetDatFile', @isTextScalar);
 addParameter(parser, 'TargetLabels', [], @(x) isnumeric(x) || islogical(x));
 addParameter(parser, 'InputLabels', [], @(x) isnumeric(x) || islogical(x));
 addParameter(parser, 'NewLabels', [], @(x) isnumeric(x) || islogical(x));
+addParameter(parser, 'TargetLabelNames', strings(0, 1), @isTextVector);
+addParameter(parser, 'InputLabelNames', strings(0, 1), @isTextVector);
+addParameter(parser, 'NewLabelNames', strings(0, 1), @isTextVector);
+addParameter(parser, 'PromptForNewLabelNames', false, @(x) islogical(x) && isscalar(x));
 addParameter(parser, 'OutputDatFile', '', @isTextScalar);
 addParameter(parser, 'LogFile', '', @isTextScalar);
 addParameter(parser, 'Tolerance', 1e-10, @(x) isnumeric(x) && isscalar(x) && x >= 0);
@@ -81,6 +96,25 @@ if any(ismember(newLabels, targetMesh.elementLabels)) || any(ismember(newLabels,
         'NewLabels must not already exist in the target mesh/material table.');
 end
 
+existingOutputLabels = sort(unique([targetMesh.elementLabels; targetMesh.materialLabels]));
+targetLabelNames = normalizeLabelNames( ...
+    parser.Results.TargetLabelNames, existingOutputLabels, 'target');
+inputLabelNames = normalizeLabelNames( ...
+    parser.Results.InputLabelNames, inputLabels, 'input');
+if isempty(inputLabelNames)
+    inputLabelNames = defaultLabelNames(inputLabels, 'input_label');
+end
+newLabelNames = normalizeLabelNames( ...
+    parser.Results.NewLabelNames, newLabels, 'new');
+if isempty(newLabelNames) && parser.Results.PromptForNewLabelNames
+    newLabelNames = promptForLabelNames(inputLabels, newLabels);
+end
+if isempty(newLabelNames)
+    newLabelNames = defaultLabelNames(newLabels, 'mapped_label');
+end
+outputLabelTable = makeOutputLabelTable( ...
+    existingOutputLabels, targetLabelNames, newLabels, newLabelNames);
+
 outputDatFile = char(parser.Results.OutputDatFile);
 if isempty(outputDatFile)
     [folder, name] = fileparts(targetDatFile);
@@ -114,7 +148,8 @@ end
 
 writeProblemDatMesh(outputDatFile, targetMesh, mappedTargetLabels, inputMesh, inputLabels, newLabels);
 writeLabelLog(logFile, inputDatFile, targetDatFile, outputDatFile, ...
-    targetLabelsToMap, inputLabels, newLabels, mappedRowsByInputLabel);
+    targetLabelsToMap, inputLabels, inputLabelNames, newLabels, newLabelNames, ...
+    mappedRowsByInputLabel, outputLabelTable);
 
 info = struct();
 info.inputMesh = inputMesh;
@@ -122,8 +157,13 @@ info.targetMesh = targetMesh;
 info.inputLabels = inputLabels;
 info.targetLabelsToMap = targetLabelsToMap;
 info.newLabels = newLabels;
-info.labelMap = table(inputLabels, newLabels, mappedRowsByInputLabel, ...
-    'VariableNames', {'InputLabel', 'NewTargetLabel', 'MappedTargetElements'});
+info.targetLabelNames = targetLabelNames;
+info.inputLabelNames = inputLabelNames;
+info.newLabelNames = newLabelNames;
+info.outputLabelTable = outputLabelTable;
+info.labelMap = table(inputLabels, inputLabelNames, newLabels, newLabelNames, mappedRowsByInputLabel, ...
+    'VariableNames', {'InputLabel', 'InputLabelName', 'NewTargetLabel', ...
+    'NewTargetLabelName', 'MappedTargetElements'});
 info.candidateTargetRows = candidateTargetRows;
 info.locatedInputElements = locatedInputElements;
 info.candidateInputLabels = candidateInputLabels;
@@ -137,9 +177,80 @@ tf = (ischar(value) && (isrow(value) || isempty(value))) || ...
      (isstring(value) && isscalar(value));
 end
 
+function tf = isTextVector(value)
+tf = isempty(value) || ischar(value) || isstring(value) || iscellstr(value);
+end
+
 function values = numericColumn(values)
 values = double(values(:));
 values = values(~isnan(values));
+end
+
+function names = normalizeLabelNames(names, labels, labelKind)
+names = textColumn(names);
+if isempty(names)
+    return;
+end
+
+if numel(names) ~= numel(labels)
+    error('mapDatMeshLabels:LabelNameCountMismatch', ...
+        '%s label names must contain one name per label.', upperFirst(labelKind));
+end
+
+fallbackNames = defaultLabelNames(labels, [labelKind '_label']);
+emptyNames = strlength(strtrim(names)) == 0;
+names(emptyNames) = fallbackNames(emptyNames);
+end
+
+function names = promptForLabelNames(inputLabels, newLabels)
+names = strings(numel(newLabels), 1);
+for labelIndex = 1:numel(newLabels)
+    prompt = sprintf('Name for new output label %.15g from input label %.15g: ', ...
+        newLabels(labelIndex), inputLabels(labelIndex));
+    answer = string(input(prompt, 's'));
+    if strlength(strtrim(answer)) == 0
+        answer = defaultLabelNames(newLabels(labelIndex), 'mapped_label');
+    end
+    names(labelIndex) = strtrim(answer);
+end
+end
+
+function names = defaultLabelNames(labels, prefix)
+names = strings(numel(labels), 1);
+for labelIndex = 1:numel(labels)
+    names(labelIndex) = sprintf('%s_%.15g', prefix, labels(labelIndex));
+end
+end
+
+function names = textColumn(names)
+if isempty(names)
+    names = strings(0, 1);
+elseif ischar(names)
+    names = string({names});
+elseif iscell(names)
+    names = string(names(:));
+else
+    names = string(names(:));
+end
+names = strtrim(names);
+end
+
+function text = upperFirst(text)
+text = char(text);
+text(1) = upper(text(1));
+end
+
+function outputLabelTable = makeOutputLabelTable(existingLabels, existingNames, newLabels, newNames)
+if isempty(existingNames)
+    existingNames = defaultLabelNames(existingLabels, 'target_label');
+end
+
+labels = [existingLabels(:); newLabels(:)];
+names = [existingNames(:); newNames(:)];
+[labels, order] = sort(labels);
+names = names(order);
+
+outputLabelTable = table(labels, names, 'VariableNames', {'Label', 'Name'});
 end
 
 function text = joinNumbers(values)
@@ -429,7 +540,8 @@ end
 end
 
 function writeLabelLog(logFile, inputDatFile, targetDatFile, outputDatFile, ...
-    targetLabelsToMap, inputLabels, newLabels, mappedRowsByInputLabel)
+    targetLabelsToMap, inputLabels, inputLabelNames, newLabels, newLabelNames, ...
+    mappedRowsByInputLabel, outputLabelTable)
 fid = fopen(logFile, 'w');
 if fid < 0
     error('mapDatMeshLabels:LogWriteFailed', 'Could not write log file: %s', logFile);
@@ -443,9 +555,19 @@ fprintf(fid, 'Input DAT: %s\n', inputDatFile);
 fprintf(fid, 'Target DAT: %s\n', targetDatFile);
 fprintf(fid, 'Output DAT: %s\n', outputDatFile);
 fprintf(fid, 'Target labels searched: %s\n', joinNumbers(targetLabelsToMap));
+
+fprintf(fid, '\nOutput material labels\n');
+fprintf(fid, 'Index | Name\n');
+for labelIndex = 1:height(outputLabelTable)
+    fprintf(fid, '  %.15g | %s\n', ...
+        outputLabelTable.Label(labelIndex), char(outputLabelTable.Name(labelIndex)));
+end
+
 fprintf(fid, '\nOld input label -> new output label\n');
 for labelIndex = 1:numel(inputLabels)
-    fprintf(fid, '  %.15g -> %.15g, mapped target elements: %d\n', ...
-        inputLabels(labelIndex), newLabels(labelIndex), mappedRowsByInputLabel(labelIndex));
+    fprintf(fid, '  %.15g (%s) -> %.15g (%s), mapped target elements: %d\n', ...
+        inputLabels(labelIndex), char(inputLabelNames(labelIndex)), ...
+        newLabels(labelIndex), char(newLabelNames(labelIndex)), ...
+        mappedRowsByInputLabel(labelIndex));
 end
 end

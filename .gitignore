@@ -1,2 +1,3 @@
 *.gid/
 Mesh__cylinder_mapped_elipse.msh
+validation_plots/
