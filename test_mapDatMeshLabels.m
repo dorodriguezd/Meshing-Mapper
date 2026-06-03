@@ -8,6 +8,7 @@ targetDatFile = fullfile(pwd, 'Output_mesh.dat');
 newDatFile = fullfile(pwd, 'New_remap.dat');
 logFile = fullfile(pwd, 'Output_mesh_mapped_input_label_log.txt');
 validationPlotFolder = fullfile(pwd, 'validation_plots');
+validationFigureVisibility = 'on';
 
 % Select the target subdomains where the input volume is allowed to project.
 % Use [] to search all target labels.
@@ -51,4 +52,4 @@ plotDatMaterialLabels( ...
     'LabelNames', labelNamesToValidate, ...
     'PlotMode', 'separate', ...
     'SaveFolder', validationPlotFolder, ...
-    'Visible', 'off');
+    'Visible', validationFigureVisibility);
