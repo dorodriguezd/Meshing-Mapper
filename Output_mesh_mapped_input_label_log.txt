@@ -1,0 +1,9 @@
+Mesh label remapping log
+Created: 2026-06-03 18:19:13
+Input DAT: D:\David\OneDrive - Politecnico di Torino\Documents\Meshing Mapper\Input_mesh.dat
+Target DAT: D:\David\OneDrive - Politecnico di Torino\Documents\Meshing Mapper\Output_mesh.dat
+Output DAT: D:\David\OneDrive - Politecnico di Torino\Documents\Meshing Mapper\Output_mesh_mapped_input.dat
+Target labels searched: 1, 2
+
+Old input label -> new output label
+  1 -> 3, mapped target elements: 7217

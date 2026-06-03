@@ -1,0 +1,451 @@
+function [mappedTargetLabels, info] = mapDatMeshLabels(inputDatFile, targetDatFile, varargin)
+%MAPDATMESHLABELS Project labeled volumes from an input .dat mesh to a target .dat mesh.
+%
+%   mappedTargetLabels = MAPDATMESHLABELS(inputDatFile, targetDatFile)
+%   reads two custom problem-type .dat tetrahedral meshes. Target elements
+%   whose centroids are inside an input volume receive new material labels;
+%   all other target labels are preserved.
+%
+%   [mappedTargetLabels, info] = MAPDATMESHLABELS(...) also returns parsed
+%   meshes, old-to-new label pairs, and mapping statistics.
+%
+%   Name-value options:
+%       'TargetLabels'   Existing target material labels allowed to be
+%                        remapped. Default: all target labels.
+%       'InputLabels'    Input material labels to project. Default: all
+%                        input labels.
+%       'NewLabels'      New target labels for each selected input label.
+%                        Default: max(existing target label) + 1, +2, ...
+%       'OutputDatFile'  Name/path for the remapped .dat file. Default:
+%                        <target name>_mapped.dat.
+%       'LogFile'        Name/path for the label mapping log. Default:
+%                        <output name>_label_log.txt.
+%       'Tolerance'      Barycentric tolerance for the fallback point
+%                        locator. Default: 1e-10.
+
+parser = inputParser;
+parser.FunctionName = mfilename;
+addRequired(parser, 'inputDatFile', @isTextScalar);
+addRequired(parser, 'targetDatFile', @isTextScalar);
+addParameter(parser, 'TargetLabels', [], @(x) isnumeric(x) || islogical(x));
+addParameter(parser, 'InputLabels', [], @(x) isnumeric(x) || islogical(x));
+addParameter(parser, 'NewLabels', [], @(x) isnumeric(x) || islogical(x));
+addParameter(parser, 'OutputDatFile', '', @isTextScalar);
+addParameter(parser, 'LogFile', '', @isTextScalar);
+addParameter(parser, 'Tolerance', 1e-10, @(x) isnumeric(x) && isscalar(x) && x >= 0);
+parse(parser, inputDatFile, targetDatFile, varargin{:});
+
+inputDatFile = char(parser.Results.inputDatFile);
+targetDatFile = char(parser.Results.targetDatFile);
+
+inputMesh = readProblemDatMesh(inputDatFile);
+targetMesh = readProblemDatMesh(targetDatFile);
+
+inputLabels = numericColumn(parser.Results.InputLabels);
+if isempty(inputLabels)
+    inputLabels = unique(inputMesh.elementLabels, 'stable');
+else
+    missingInputLabels = setdiff(inputLabels, unique(inputMesh.elementLabels));
+    if ~isempty(missingInputLabels)
+        error('mapDatMeshLabels:MissingInputLabels', ...
+            'Input labels not found in %s: %s', inputDatFile, joinNumbers(missingInputLabels));
+    end
+end
+
+targetLabelsToMap = numericColumn(parser.Results.TargetLabels);
+if isempty(targetLabelsToMap)
+    targetLabelsToMap = unique(targetMesh.elementLabels, 'stable');
+else
+    missingTargetLabels = setdiff(targetLabelsToMap, unique(targetMesh.elementLabels));
+    if ~isempty(missingTargetLabels)
+        error('mapDatMeshLabels:MissingTargetLabels', ...
+            'Target labels not found in %s: %s', targetDatFile, joinNumbers(missingTargetLabels));
+    end
+end
+
+newLabels = numericColumn(parser.Results.NewLabels);
+if isempty(newLabels)
+    existingLabels = unique([targetMesh.elementLabels; targetMesh.materialLabels]);
+    nextLabel = max(existingLabels) + 1;
+    newLabels = nextLabel:(nextLabel + numel(inputLabels) - 1);
+    newLabels = newLabels(:);
+elseif numel(newLabels) ~= numel(inputLabels)
+    error('mapDatMeshLabels:NewLabelCountMismatch', ...
+        'NewLabels must contain one value per selected input label.');
+else
+    newLabels = newLabels(:);
+end
+
+if any(ismember(newLabels, targetMesh.elementLabels)) || any(ismember(newLabels, targetMesh.materialLabels))
+    error('mapDatMeshLabels:NewLabelConflict', ...
+        'NewLabels must not already exist in the target mesh/material table.');
+end
+
+outputDatFile = char(parser.Results.OutputDatFile);
+if isempty(outputDatFile)
+    [folder, name] = fileparts(targetDatFile);
+    outputDatFile = fullfile(folder, [name '_mapped.dat']);
+end
+
+logFile = char(parser.Results.LogFile);
+if isempty(logFile)
+    [folder, name] = fileparts(outputDatFile);
+    logFile = fullfile(folder, [name '_label_log.txt']);
+end
+
+candidateTargetRows = find(ismember(targetMesh.elementLabels, targetLabelsToMap));
+candidateCentroids = tetraCentroids(targetMesh.nodes, targetMesh.elements(candidateTargetRows, :));
+locatedInputElements = locatePointsInTets( ...
+    inputMesh.nodes, inputMesh.elements, candidateCentroids, parser.Results.Tolerance);
+
+mappedTargetLabels = targetMesh.elementLabels;
+candidateInputLabels = nan(size(candidateTargetRows));
+insideInput = ~isnan(locatedInputElements);
+candidateInputLabels(insideInput) = inputMesh.elementLabels(locatedInputElements(insideInput));
+
+mappedRowsByInputLabel = zeros(numel(inputLabels), 1);
+for labelIndex = 1:numel(inputLabels)
+    oldLabel = inputLabels(labelIndex);
+    newLabel = newLabels(labelIndex);
+    rowsForLabel = candidateTargetRows(candidateInputLabels == oldLabel);
+    mappedTargetLabels(rowsForLabel) = newLabel;
+    mappedRowsByInputLabel(labelIndex) = numel(rowsForLabel);
+end
+
+writeProblemDatMesh(outputDatFile, targetMesh, mappedTargetLabels, inputMesh, inputLabels, newLabels);
+writeLabelLog(logFile, inputDatFile, targetDatFile, outputDatFile, ...
+    targetLabelsToMap, inputLabels, newLabels, mappedRowsByInputLabel);
+
+info = struct();
+info.inputMesh = inputMesh;
+info.targetMesh = targetMesh;
+info.inputLabels = inputLabels;
+info.targetLabelsToMap = targetLabelsToMap;
+info.newLabels = newLabels;
+info.labelMap = table(inputLabels, newLabels, mappedRowsByInputLabel, ...
+    'VariableNames', {'InputLabel', 'NewTargetLabel', 'MappedTargetElements'});
+info.candidateTargetRows = candidateTargetRows;
+info.locatedInputElements = locatedInputElements;
+info.candidateInputLabels = candidateInputLabels;
+info.mappedRows = find(mappedTargetLabels ~= targetMesh.elementLabels);
+info.outputDatFile = outputDatFile;
+info.logFile = logFile;
+end
+
+function tf = isTextScalar(value)
+tf = (ischar(value) && (isrow(value) || isempty(value))) || ...
+     (isstring(value) && isscalar(value));
+end
+
+function values = numericColumn(values)
+values = double(values(:));
+values = values(~isnan(values));
+end
+
+function text = joinNumbers(values)
+text = strjoin(compose('%.15g', values(:).'), ', ');
+end
+
+function mesh = readProblemDatMesh(fileName)
+rawLines = readTextLines(fileName);
+coordinatesLine = findSection(rawLines, 'Coordinates', fileName);
+endCoordinatesLine = findSection(rawLines, 'end Coordinates', fileName);
+elementsLine = findSection(rawLines, 'Elements', fileName);
+endElementsLine = findSection(rawLines, 'end Elements', fileName);
+
+coordinateCount = parseCount(rawLines{coordinatesLine + 1}, 'Coordinates', fileName);
+nodes = parseNumericBlock(rawLines, coordinatesLine + 2, coordinateCount, 3, 'coordinate', fileName);
+
+elementCount = parseCount(rawLines{elementsLine + 1}, 'Elements', fileName);
+elementRows = parseNumericBlock(rawLines, elementsLine + 2, elementCount, 5, 'element', fileName);
+elements = elementRows(:, 1:4);
+elementLabels = elementRows(:, end);
+
+if any(elements(:) < 1) || any(elements(:) > size(nodes, 1))
+    error('mapDatMeshLabels:BadConnectivity', ...
+        'Element connectivity in %s references nodes outside the coordinate block.', fileName);
+end
+
+material = parseMaterialProperties(rawLines);
+
+mesh = struct();
+mesh.fileName = fileName;
+mesh.rawLines = rawLines;
+mesh.coordinatesLine = coordinatesLine;
+mesh.endCoordinatesLine = endCoordinatesLine;
+mesh.elementsLine = elementsLine;
+mesh.endElementsLine = endElementsLine;
+mesh.nodes = nodes;
+mesh.elements = elements;
+mesh.elementLabels = elementLabels;
+mesh.materialLabels = material.labels;
+mesh.materialRows = material.rows;
+mesh.materialComment = material.comment;
+mesh.materialLine = material.startLine;
+mesh.endMaterialLine = material.endLine;
+end
+
+function rawLines = readTextLines(fileName)
+fid = fopen(fileName, 'r');
+if fid < 0
+    error('mapDatMeshLabels:OpenFailed', 'Could not open file: %s', fileName);
+end
+cleanup = onCleanup(@() fclose(fid));
+
+rawLines = {};
+line = fgetl(fid);
+while ischar(line)
+    rawLines{end + 1, 1} = line; %#ok<AGROW>
+    line = fgetl(fid);
+end
+end
+
+function lineNumber = findSection(rawLines, sectionName, fileName)
+matches = find(strcmpi(strtrim(rawLines), sectionName), 1, 'first');
+if isempty(matches)
+    error('mapDatMeshLabels:MissingSection', ...
+        'Could not find section "%s" in %s.', sectionName, fileName);
+end
+lineNumber = matches;
+end
+
+function count = parseCount(line, sectionName, fileName)
+count = sscanf(strtrim(line), '%d', 1);
+if isempty(count) || count < 0
+    error('mapDatMeshLabels:BadCount', ...
+        'Invalid %s count in %s: %s', sectionName, fileName, line);
+end
+end
+
+function values = parseNumericBlock(rawLines, startLine, rowCount, minColumns, blockName, fileName)
+values = zeros(rowCount, minColumns);
+for row = 1:rowCount
+    lineNumber = startLine + row - 1;
+    if lineNumber > numel(rawLines)
+        error('mapDatMeshLabels:UnexpectedEndOfFile', ...
+            'Unexpected end of file while reading %s rows in %s.', blockName, fileName);
+    end
+    rowValues = sscanf(strtrim(rawLines{lineNumber}), '%f').';
+    if numel(rowValues) < minColumns
+        error('mapDatMeshLabels:BadNumericRow', ...
+            'Invalid %s row in %s: %s', blockName, fileName, rawLines{lineNumber});
+    end
+    if row == 1 && numel(rowValues) > minColumns
+        values = zeros(rowCount, numel(rowValues));
+    elseif numel(rowValues) ~= size(values, 2)
+        error('mapDatMeshLabels:InconsistentColumns', ...
+            'Inconsistent %s column count in %s at line %d.', blockName, fileName, lineNumber);
+    end
+    values(row, :) = rowValues;
+end
+end
+
+function material = parseMaterialProperties(rawLines)
+material.startLine = find(strcmpi(strtrim(rawLines), 'Material properties'), 1, 'first');
+material.endLine = [];
+material.labels = zeros(0, 1);
+material.rows = zeros(0, 6);
+material.comment = '# LABEL | Conductivity | REAL(eps) | IMAG(eps) | REAL(mu) | IMAG(mu) ';
+
+if isempty(material.startLine)
+    return;
+end
+
+count = parseCount(rawLines{material.startLine + 1}, 'Material properties', 'dat file');
+cursor = material.startLine + 2;
+if cursor <= numel(rawLines) && startsWith(strtrim(rawLines{cursor}), '#')
+    material.comment = rawLines{cursor};
+    cursor = cursor + 1;
+end
+
+material.rows = zeros(count, 6);
+for row = 1:count
+    rowValues = sscanf(strtrim(rawLines{cursor + row - 1}), '%f').';
+    if numel(rowValues) < 6
+        error('mapDatMeshLabels:BadMaterialRow', ...
+            'Invalid material property row at line %d.', cursor + row - 1);
+    end
+    material.rows(row, :) = rowValues(1:6);
+end
+material.labels = material.rows(:, 1);
+material.endLine = cursor + count - 1;
+end
+
+function centroids = tetraCentroids(nodes, elements)
+centroids = (nodes(elements(:, 1), :) + nodes(elements(:, 2), :) + ...
+    nodes(elements(:, 3), :) + nodes(elements(:, 4), :)) / 4;
+end
+
+function elementIndex = locatePointsInTets(nodes, elements, points, tolerance)
+elementIndex = nan(size(points, 1), 1);
+if isempty(points)
+    return;
+end
+
+boxMin = min(nodes, [], 1) - tolerance;
+boxMax = max(nodes, [], 1) + tolerance;
+candidatePoint = all(points >= boxMin & points <= boxMax, 2);
+candidateRows = find(candidatePoint);
+if isempty(candidateRows)
+    return;
+end
+
+usedTsearchn = false;
+if exist('tsearchn', 'file') == 2 || exist('tsearchn', 'builtin') == 5
+    try
+        located = tsearchn(nodes, elements, points(candidateRows, :));
+        elementIndex(candidateRows) = located(:);
+        usedTsearchn = true;
+    catch
+        usedTsearchn = false;
+    end
+end
+
+if ~usedTsearchn || (tolerance > 0 && any(isnan(elementIndex(candidateRows))))
+    unresolvedRows = candidateRows(isnan(elementIndex(candidateRows)));
+    fallbackIndex = bruteForcePointLocation(nodes, elements, points(unresolvedRows, :), tolerance);
+    found = ~isnan(fallbackIndex);
+    elementIndex(unresolvedRows(found)) = fallbackIndex(found);
+end
+end
+
+function pointElementIndex = bruteForcePointLocation(nodes, elements, points, tolerance)
+pointElementIndex = nan(size(points, 1), 1);
+if isempty(points)
+    return;
+end
+
+unresolved = true(size(points, 1), 1);
+for elem = 1:size(elements, 1)
+    if ~any(unresolved)
+        break;
+    end
+
+    vertices = nodes(elements(elem, :), :);
+    boxMin = min(vertices, [], 1) - tolerance;
+    boxMax = max(vertices, [], 1) + tolerance;
+    candidates = find(unresolved & all(points >= boxMin & points <= boxMax, 2));
+    if isempty(candidates)
+        continue;
+    end
+
+    transform = [vertices(2, :) - vertices(1, :); ...
+                 vertices(3, :) - vertices(1, :); ...
+                 vertices(4, :) - vertices(1, :)].';
+    if abs(det(transform)) < eps
+        continue;
+    end
+
+    local = (transform \ (points(candidates, :) - vertices(1, :)).').';
+    barycentric = [1 - sum(local, 2), local];
+    inside = all(barycentric >= -tolerance & barycentric <= 1 + tolerance, 2);
+    foundRows = candidates(inside);
+    pointElementIndex(foundRows) = elem;
+    unresolved(foundRows) = false;
+end
+end
+
+function writeProblemDatMesh(fileName, targetMesh, labels, inputMesh, inputLabels, newLabels)
+fid = fopen(fileName, 'w');
+if fid < 0
+    error('mapDatMeshLabels:WriteFailed', 'Could not write file: %s', fileName);
+end
+cleanup = onCleanup(@() fclose(fid));
+
+for lineNumber = 1:(targetMesh.coordinatesLine - 1)
+    fprintf(fid, '%s\n', targetMesh.rawLines{lineNumber});
+end
+
+fprintf(fid, 'Coordinates\n');
+fprintf(fid, '%9d\n', size(targetMesh.nodes, 1));
+for node = 1:size(targetMesh.nodes, 1)
+    fprintf(fid, '%16.9f %16.9f %16.9f\n', ...
+        targetMesh.nodes(node, 1), targetMesh.nodes(node, 2), targetMesh.nodes(node, 3));
+end
+fprintf(fid, 'end Coordinates\n\n');
+
+fprintf(fid, 'Elements\n');
+fprintf(fid, '%9d\n', size(targetMesh.elements, 1));
+for elem = 1:size(targetMesh.elements, 1)
+    fprintf(fid, '%10d %10d %10d %10d %9d\n', ...
+        targetMesh.elements(elem, 1), targetMesh.elements(elem, 2), ...
+        targetMesh.elements(elem, 3), targetMesh.elements(elem, 4), labels(elem));
+end
+fprintf(fid, 'end Elements\n');
+
+suffixLines = targetMesh.rawLines((targetMesh.endElementsLine + 1):end);
+suffixLines = replaceMaterialProperties(suffixLines, targetMesh, inputMesh, inputLabels, newLabels);
+for lineNumber = 1:numel(suffixLines)
+    fprintf(fid, '%s\n', suffixLines{lineNumber});
+end
+end
+
+function suffixLines = replaceMaterialProperties(suffixLines, targetMesh, inputMesh, inputLabels, newLabels)
+startLine = find(strcmpi(strtrim(suffixLines), 'Material properties'), 1, 'first');
+if isempty(startLine)
+    suffixLines = [suffixLines; buildMaterialPropertyLines(targetMesh, inputMesh, inputLabels, newLabels)];
+    return;
+end
+
+count = parseCount(suffixLines{startLine + 1}, 'Material properties', 'target suffix');
+cursor = startLine + 2;
+if cursor <= numel(suffixLines) && startsWith(strtrim(suffixLines{cursor}), '#')
+    cursor = cursor + 1;
+end
+endLine = cursor + count - 1;
+
+replacement = buildMaterialPropertyLines(targetMesh, inputMesh, inputLabels, newLabels);
+suffixLines = [suffixLines(1:startLine - 1); replacement; suffixLines(endLine + 1:end)];
+end
+
+function lines = buildMaterialPropertyLines(targetMesh, inputMesh, inputLabels, newLabels)
+rows = targetMesh.materialRows;
+if isempty(rows)
+    rows = unique(targetMesh.elementLabels, 'stable');
+    rows = [rows, zeros(numel(rows), 1), ones(numel(rows), 1), ...
+        zeros(numel(rows), 1), ones(numel(rows), 1), zeros(numel(rows), 1)];
+end
+
+newRows = zeros(numel(inputLabels), 6);
+for labelIndex = 1:numel(inputLabels)
+    sourceRow = inputMesh.materialRows(inputMesh.materialLabels == inputLabels(labelIndex), :);
+    if isempty(sourceRow)
+        sourceRow = rows(1, :);
+    end
+    newRows(labelIndex, :) = sourceRow(1, :);
+    newRows(labelIndex, 1) = newLabels(labelIndex);
+end
+
+rows = [rows; newRows];
+lines = cell(size(rows, 1) + 4, 1);
+lines{1} = '';
+lines{2} = 'Material properties';
+lines{3} = sprintf('%9d', size(rows, 1));
+lines{4} = targetMesh.materialComment;
+for row = 1:size(rows, 1)
+    lines{row + 4} = sprintf('%9d %15.9f %15.9f %15.9f %15.9f %15.9f', ...
+        rows(row, 1), rows(row, 2), rows(row, 3), rows(row, 4), rows(row, 5), rows(row, 6));
+end
+end
+
+function writeLabelLog(logFile, inputDatFile, targetDatFile, outputDatFile, ...
+    targetLabelsToMap, inputLabels, newLabels, mappedRowsByInputLabel)
+fid = fopen(logFile, 'w');
+if fid < 0
+    error('mapDatMeshLabels:LogWriteFailed', 'Could not write log file: %s', logFile);
+end
+cleanup = onCleanup(@() fclose(fid));
+timestamp = char(datetime('now', 'Format', 'yyyy-MM-dd HH:mm:ss'));
+
+fprintf(fid, 'Mesh label remapping log\n');
+fprintf(fid, 'Created: %s\n', timestamp);
+fprintf(fid, 'Input DAT: %s\n', inputDatFile);
+fprintf(fid, 'Target DAT: %s\n', targetDatFile);
+fprintf(fid, 'Output DAT: %s\n', outputDatFile);
+fprintf(fid, 'Target labels searched: %s\n', joinNumbers(targetLabelsToMap));
+fprintf(fid, '\nOld input label -> new output label\n');
+for labelIndex = 1:numel(inputLabels)
+    fprintf(fid, '  %.15g -> %.15g, mapped target elements: %d\n', ...
+        inputLabels(labelIndex), newLabels(labelIndex), mappedRowsByInputLabel(labelIndex));
+end
+end
