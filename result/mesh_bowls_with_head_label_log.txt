@@ -1,9 +1,9 @@
 Mesh label remapping log
-Created: 2026-06-04 13:01:27
+Created: 2026-06-04 16:18:48
 Input DAT: D:\David\OneDrive - Politecnico di Torino\Documents\Meshing Mapper\HeadMapping\mesh_head.dat
 Target DAT: D:\David\OneDrive - Politecnico di Torino\Documents\Meshing Mapper\HeadMapping\mesh_bowls.dat
 Output DAT: D:\David\OneDrive - Politecnico di Torino\Documents\Meshing Mapper\result\mesh_bowls_with_head.dat
-Target labels searched: 21
+Target labels searched: 20, 21
 
 Output material labels
 Index | Name
@@ -35,8 +35,26 @@ Index | Name
   26 | SKULL
 
 Old input label -> new output label
-  1 (gray) -> 22 (gray), mapped target elements: 604523
-  2 (CSF) -> 23 (CSF), mapped target elements: 183121
-  3 (FAT) -> 24 (FAT), mapped target elements: 442583
-  4 (SKIN) -> 25 (SKIN), mapped target elements: 46839
-  5 (SKULL) -> 26 (SKULL), mapped target elements: 305306
+  1 (gray) -> 22 (gray), mapped target elements: 604019
+  2 (CSF) -> 23 (CSF), mapped target elements: 186248
+  3 (FAT) -> 24 (FAT), mapped target elements: 1102523
+  4 (SKIN) -> 25 (SKIN), mapped target elements: 237760
+  5 (SKULL) -> 26 (SKULL), mapped target elements: 372000
+
+Source-centroid repair
+  Total selected source elements: 661750
+  Primary target labels: 20, 21
+  Fallback target labels: 19
+  Located source elements: 661750
+  Unlocated source elements: 0
+  Repaired target elements: 565069
+  Primary located source elements: 661744
+  Primary repaired target elements: 565065
+  Fallback located source elements: 6
+  Fallback newly located source elements: 6
+  Fallback repaired target elements: 4
+  1 (gray) repair target elements: 50083
+  2 (CSF) repair target elements: 89958
+  3 (FAT) repair target elements: 196731
+  4 (SKIN) repair target elements: 66987
+  5 (SKULL) repair target elements: 161310

@@ -35,6 +35,16 @@ function [mappedTargetLabels, info] = mapDatMeshLabels(inputDatFile, targetDatFi
 %                        locator. Default: 1e-10.
 %       'ChunkSize'      Number of target elements processed at a time for
 %                        centroid point-location. Default: 250000.
+%       'SourceCentroidRepair'
+%                        Also locate source element centroids inside the
+%                        selected target subdomains and label the containing
+%                        target elements by source-label majority. This
+%                        improves source-volume coverage for large/remeshed
+%                        targets. Default: false.
+%       'RepairFallbackTargetLabels'
+%                        Extra target labels used only by the source-centroid
+%                        repair pass. They are not part of the regular
+%                        target-centroid projection. Default: [].
 
 parser = inputParser;
 parser.FunctionName = mfilename;
@@ -51,6 +61,8 @@ addParameter(parser, 'OutputDatFile', '', @isTextScalar);
 addParameter(parser, 'LogFile', '', @isTextScalar);
 addParameter(parser, 'Tolerance', 1e-10, @(x) isnumeric(x) && isscalar(x) && x >= 0);
 addParameter(parser, 'ChunkSize', 250000, @(x) isnumeric(x) && isscalar(x) && x > 0);
+addParameter(parser, 'SourceCentroidRepair', false, @(x) islogical(x) && isscalar(x));
+addParameter(parser, 'RepairFallbackTargetLabels', [], @(x) isnumeric(x) || islogical(x));
 parse(parser, inputDatFile, targetDatFile, varargin{:});
 
 inputDatFile = char(parser.Results.inputDatFile);
@@ -78,6 +90,16 @@ else
     if ~isempty(missingTargetLabels)
         error('mapDatMeshLabels:MissingTargetLabels', ...
             'Target labels not found in %s: %s', targetDatFile, joinNumbers(missingTargetLabels));
+    end
+end
+
+repairFallbackTargetLabels = numericColumn(parser.Results.RepairFallbackTargetLabels);
+if ~isempty(repairFallbackTargetLabels)
+    missingFallbackLabels = setdiff(repairFallbackTargetLabels, unique(targetMesh.elementLabels));
+    if ~isempty(missingFallbackLabels)
+        error('mapDatMeshLabels:MissingFallbackTargetLabels', ...
+            'Repair fallback target labels not found in %s: %s', ...
+            targetDatFile, joinNumbers(missingFallbackLabels));
     end
 end
 
@@ -144,16 +166,68 @@ for labelIndex = 1:numel(inputLabels)
     mappedRowsByInputLabel(labelIndex) = numel(rowsForLabel);
 end
 
+repairInfo = struct();
+repairInfo.enabled = parser.Results.SourceCentroidRepair;
+repairInfo.locatedSourceElements = 0;
+repairInfo.unlocatedSourceElements = 0;
+repairInfo.repairedTargetElements = 0;
+repairInfo.repairedRowsByInputLabel = zeros(numel(inputLabels), 1);
+repairInfo.primaryTargetLabels = targetLabelsToMap;
+repairInfo.fallbackTargetLabels = repairFallbackTargetLabels;
+repairInfo.primaryLocatedSourceElements = 0;
+repairInfo.fallbackLocatedSourceElements = 0;
+repairInfo.fallbackNewLocatedSourceElements = 0;
+repairInfo.fallbackRepairedTargetElements = 0;
+if parser.Results.SourceCentroidRepair
+    selectedSourceRows = find(ismember(inputMesh.elementLabels, inputLabels));
+    repairInfo.totalSourceElements = numel(selectedSourceRows);
+    [repairTargetRows, repairInputLabels, repairInfo, locatedSourceRows] = repairBySourceCentroids( ...
+        inputMesh, targetMesh, candidateTargetRows, inputLabels, parser.Results.Tolerance, repairInfo);
+    repairInfo.primaryLocatedSourceElements = repairInfo.locatedSourceElements;
+    repairInfo.primaryRepairedTargetElements = repairInfo.repairedTargetElements;
+
+    if ~isempty(repairFallbackTargetLabels) && repairInfo.unlocatedSourceElements > 0
+        fallbackTargetRows = find(ismember(targetMesh.elementLabels, repairFallbackTargetLabels));
+        missingSourceRows = setdiff(selectedSourceRows, locatedSourceRows);
+        fallbackInfo = repairInfo;
+        [fallbackTargetRows, fallbackInputLabels, fallbackInfo, fallbackLocatedSourceRows] = ...
+            repairBySourceCentroids(inputMesh, targetMesh, fallbackTargetRows, ...
+            inputLabels, parser.Results.Tolerance, fallbackInfo, missingSourceRows);
+
+        repairTargetRows = [repairTargetRows; fallbackTargetRows];
+        repairInputLabels = [repairInputLabels; fallbackInputLabels];
+        repairInfo.fallbackLocatedSourceElements = fallbackInfo.locatedSourceElements;
+        repairInfo.fallbackRepairedTargetElements = fallbackInfo.repairedTargetElements;
+        repairInfo.fallbackNewLocatedSourceElements = numel(fallbackLocatedSourceRows);
+        locatedSourceRows = unique([locatedSourceRows; fallbackLocatedSourceRows]);
+        repairInfo.locatedSourceElements = numel(locatedSourceRows);
+        repairInfo.unlocatedSourceElements = repairInfo.totalSourceElements - ...
+            repairInfo.locatedSourceElements;
+        repairInfo.repairedTargetElements = numel(unique(repairTargetRows));
+    end
+
+    for labelIndex = 1:numel(inputLabels)
+        rowsForLabel = repairTargetRows(repairInputLabels == inputLabels(labelIndex));
+        mappedTargetLabels(rowsForLabel) = newLabels(labelIndex);
+        repairInfo.repairedRowsByInputLabel(labelIndex) = numel(rowsForLabel);
+    end
+
+    for labelIndex = 1:numel(inputLabels)
+        mappedRowsByInputLabel(labelIndex) = nnz(mappedTargetLabels == newLabels(labelIndex));
+    end
+end
+
 writeProblemDatMesh(outputDatFile, targetMesh, mappedTargetLabels, inputMesh, inputLabels, newLabels);
 writeLabelLog(logFile, inputDatFile, targetDatFile, outputDatFile, ...
     targetLabelsToMap, inputLabels, inputLabelNames, newLabels, newLabelNames, ...
-    mappedRowsByInputLabel, outputLabelTable);
+    mappedRowsByInputLabel, outputLabelTable, repairInfo);
 
 info = struct();
 info.inputMesh = inputMesh;
 info.targetMesh = targetMesh;
 info.inputLabels = inputLabels;
 info.targetLabelsToMap = targetLabelsToMap;
+info.repairFallbackTargetLabels = repairFallbackTargetLabels;
 info.newLabels = newLabels;
 info.targetLabelNames = targetLabelNames;
 info.inputLabelNames = inputLabelNames;
@@ -165,6 +239,7 @@ info.labelMap = table(inputLabels, inputLabelNames, newLabels, newLabelNames, ma
 info.candidateTargetRows = candidateTargetRows;
 info.locatedInputElements = locatedInputElements;
 info.candidateInputLabels = candidateInputLabels;
+info.repairInfo = repairInfo;
 info.mappedRows = find(mappedTargetLabels ~= targetMesh.elementLabels);
 info.outputDatFile = outputDatFile;
 info.logFile = logFile;
@@ -441,6 +516,69 @@ for firstRow = 1:chunkSize:numel(candidateTargetRows)
 end
 end
 
+function [repairTargetRows, repairInputLabels, repairInfo, locatedSourceRows] = repairBySourceCentroids( ...
+    inputMesh, targetMesh, candidateTargetRows, inputLabels, ~, repairInfo, selectedSourceRows)
+repairTargetRows = zeros(0, 1);
+repairInputLabels = zeros(0, 1);
+locatedSourceRows = zeros(0, 1);
+
+if nargin < 7 || isempty(selectedSourceRows)
+    selectedSourceRows = find(ismember(inputMesh.elementLabels, inputLabels));
+else
+    selectedSourceRows = selectedSourceRows(:);
+end
+
+if isempty(selectedSourceRows) || isempty(candidateTargetRows)
+    repairInfo.unlocatedSourceElements = numel(selectedSourceRows);
+    return;
+end
+
+sourceCentroids = tetraCentroids(inputMesh.nodes, inputMesh.elements(selectedSourceRows, :));
+sourceLabels = inputMesh.elementLabels(selectedSourceRows);
+
+try
+    targetTriangulation = triangulation( ...
+        targetMesh.elements(candidateTargetRows, :), targetMesh.nodes);
+    localTargetRows = pointLocation(targetTriangulation, sourceCentroids);
+catch exception
+    error('mapDatMeshLabels:SourceCentroidRepairFailed', ...
+        ['Could not build/use the selected target triangulation for ' ...
+        'SourceCentroidRepair: %s'], exception.message);
+end
+
+located = ~isnan(localTargetRows);
+repairInfo.locatedSourceElements = nnz(located);
+repairInfo.unlocatedSourceElements = nnz(~located);
+if ~any(located)
+    return;
+end
+
+locatedSourceRows = selectedSourceRows(located);
+targetRowsForSource = candidateTargetRows(localTargetRows(located));
+sourceLabelsForTarget = sourceLabels(located);
+[uniqueTargetRows, ~, targetGroup] = unique(targetRowsForSource);
+labelIndices = labelToIndex(sourceLabelsForTarget, inputLabels);
+
+voteCounts = accumarray([targetGroup, labelIndices], 1, ...
+    [numel(uniqueTargetRows), numel(inputLabels)], @sum, 0);
+[~, winningLabelIndex] = max(voteCounts, [], 2);
+
+repairTargetRows = uniqueTargetRows;
+repairInputLabels = inputLabels(winningLabelIndex);
+repairInfo.repairedTargetElements = numel(repairTargetRows);
+end
+
+function indices = labelToIndex(labels, labelSet)
+indices = zeros(numel(labels), 1);
+for labelIndex = 1:numel(labelSet)
+    indices(labels == labelSet(labelIndex)) = labelIndex;
+end
+if any(indices == 0)
+    error('mapDatMeshLabels:UnexpectedRepairLabel', ...
+        'Source-centroid repair found a label outside InputLabels.');
+end
+end
+
 function elementIndex = locatePointsInTets(nodes, elements, points, tolerance)
 elementIndex = nan(size(points, 1), 1);
 if isempty(points)
@@ -594,7 +732,7 @@ end
 
 function writeLabelLog(logFile, inputDatFile, targetDatFile, outputDatFile, ...
     targetLabelsToMap, inputLabels, inputLabelNames, newLabels, newLabelNames, ...
-    mappedRowsByInputLabel, outputLabelTable)
+    mappedRowsByInputLabel, outputLabelTable, repairInfo)
 fid = fopen(logFile, 'w');
 if fid < 0
     error('mapDatMeshLabels:LogWriteFailed', 'Could not write log file: %s', logFile);
@@ -622,5 +760,43 @@ for labelIndex = 1:numel(inputLabels)
         inputLabels(labelIndex), char(inputLabelNames(labelIndex)), ...
         newLabels(labelIndex), char(newLabelNames(labelIndex)), ...
         mappedRowsByInputLabel(labelIndex));
+end
+
+if isfield(repairInfo, 'enabled') && repairInfo.enabled
+    fprintf(fid, '\nSource-centroid repair\n');
+    if isfield(repairInfo, 'totalSourceElements')
+        fprintf(fid, '  Total selected source elements: %d\n', repairInfo.totalSourceElements);
+    end
+    if isfield(repairInfo, 'primaryTargetLabels')
+        fprintf(fid, '  Primary target labels: %s\n', joinNumbers(repairInfo.primaryTargetLabels));
+    end
+    if isfield(repairInfo, 'fallbackTargetLabels') && ~isempty(repairInfo.fallbackTargetLabels)
+        fprintf(fid, '  Fallback target labels: %s\n', joinNumbers(repairInfo.fallbackTargetLabels));
+    end
+    fprintf(fid, '  Located source elements: %d\n', repairInfo.locatedSourceElements);
+    fprintf(fid, '  Unlocated source elements: %d\n', repairInfo.unlocatedSourceElements);
+    fprintf(fid, '  Repaired target elements: %d\n', repairInfo.repairedTargetElements);
+    if isfield(repairInfo, 'primaryLocatedSourceElements')
+        fprintf(fid, '  Primary located source elements: %d\n', ...
+            repairInfo.primaryLocatedSourceElements);
+    end
+    if isfield(repairInfo, 'primaryRepairedTargetElements')
+        fprintf(fid, '  Primary repaired target elements: %d\n', ...
+            repairInfo.primaryRepairedTargetElements);
+    end
+    if isfield(repairInfo, 'fallbackLocatedSourceElements') && ...
+            repairInfo.fallbackLocatedSourceElements > 0
+        fprintf(fid, '  Fallback located source elements: %d\n', ...
+            repairInfo.fallbackLocatedSourceElements);
+        fprintf(fid, '  Fallback newly located source elements: %d\n', ...
+            repairInfo.fallbackNewLocatedSourceElements);
+        fprintf(fid, '  Fallback repaired target elements: %d\n', ...
+            repairInfo.fallbackRepairedTargetElements);
+    end
+    for labelIndex = 1:numel(inputLabels)
+        fprintf(fid, '  %.15g (%s) repair target elements: %d\n', ...
+            inputLabels(labelIndex), char(inputLabelNames(labelIndex)), ...
+            repairInfo.repairedRowsByInputLabel(labelIndex));
+    end
 end
 end
