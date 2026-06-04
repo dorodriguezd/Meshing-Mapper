@@ -51,6 +51,15 @@ function [mappedTargetLabels, info] = mapDatMeshLabels(inputDatFile, targetDatFi
 %                        labels are assigned from the containing source
 %                        element, or the nearest source centroid when they
 %                        fall outside the source mesh. Default: [].
+%       'HoleRepairTargetLabels'
+%                        Existing target labels where small unmapped islands
+%                        should be filled from neighboring mapped tissue
+%                        labels by shared-node votes. Default: [].
+%       'HoleRepairMaxPasses'
+%                        Maximum local hole-repair iterations. Default: 0.
+%       'HoleRepairMinNodeVotes'
+%                        Minimum shared-node tissue votes needed to fill an
+%                        unmapped target element. Default: 4.
 
 parser = inputParser;
 parser.FunctionName = mfilename;
@@ -70,6 +79,9 @@ addParameter(parser, 'ChunkSize', 250000, @(x) isnumeric(x) && isscalar(x) && x 
 addParameter(parser, 'SourceCentroidRepair', false, @(x) islogical(x) && isscalar(x));
 addParameter(parser, 'RepairFallbackTargetLabels', [], @(x) isnumeric(x) || islogical(x));
 addParameter(parser, 'FillUnmappedTargetLabels', [], @(x) isnumeric(x) || islogical(x));
+addParameter(parser, 'HoleRepairTargetLabels', [], @(x) isnumeric(x) || islogical(x));
+addParameter(parser, 'HoleRepairMaxPasses', 0, @(x) isnumeric(x) && isscalar(x) && x >= 0);
+addParameter(parser, 'HoleRepairMinNodeVotes', 4, @(x) isnumeric(x) && isscalar(x) && x > 0);
 parse(parser, inputDatFile, targetDatFile, varargin{:});
 
 inputDatFile = char(parser.Results.inputDatFile);
@@ -119,6 +131,18 @@ if ~isempty(fillUnmappedTargetLabels)
             targetDatFile, joinNumbers(missingFillLabels));
     end
 end
+
+holeRepairTargetLabels = numericColumn(parser.Results.HoleRepairTargetLabels);
+if ~isempty(holeRepairTargetLabels)
+    missingHoleRepairLabels = setdiff(holeRepairTargetLabels, unique(targetMesh.elementLabels));
+    if ~isempty(missingHoleRepairLabels)
+        error('mapDatMeshLabels:MissingHoleRepairTargetLabels', ...
+            'Hole-repair target labels not found in %s: %s', ...
+            targetDatFile, joinNumbers(missingHoleRepairLabels));
+    end
+end
+holeRepairMaxPasses = floor(parser.Results.HoleRepairMaxPasses);
+holeRepairMinNodeVotes = floor(parser.Results.HoleRepairMinNodeVotes);
 
 newLabels = numericColumn(parser.Results.NewLabels);
 if isempty(newLabels)
@@ -234,6 +258,26 @@ if parser.Results.SourceCentroidRepair
     end
 end
 
+holeRepairInfo = struct();
+holeRepairInfo.enabled = ~isempty(holeRepairTargetLabels) && holeRepairMaxPasses > 0;
+holeRepairInfo.targetLabels = holeRepairTargetLabels;
+holeRepairInfo.maxPasses = holeRepairMaxPasses;
+holeRepairInfo.minNodeVotes = holeRepairMinNodeVotes;
+holeRepairInfo.candidateTargetElements = 0;
+holeRepairInfo.initialUnmappedTargetElements = 0;
+holeRepairInfo.filledTargetElements = 0;
+holeRepairInfo.filledRowsByInputLabel = zeros(numel(inputLabels), 1);
+holeRepairInfo.passFilledTargetElements = zeros(holeRepairMaxPasses, 1);
+if holeRepairInfo.enabled
+    [mappedTargetLabels, holeRepairInfo] = repairUnmappedTargetHolesByNodeVotes( ...
+        targetMesh, mappedTargetLabels, inputLabels, newLabels, ...
+        holeRepairInfo);
+
+    for labelIndex = 1:numel(inputLabels)
+        mappedRowsByInputLabel(labelIndex) = nnz(mappedTargetLabels == newLabels(labelIndex));
+    end
+end
+
 fillInfo = struct();
 fillInfo.enabled = ~isempty(fillUnmappedTargetLabels);
 fillInfo.requestedTargetLabels = fillUnmappedTargetLabels;
@@ -268,7 +312,7 @@ end
 writeProblemDatMesh(outputDatFile, targetMesh, mappedTargetLabels, inputMesh, inputLabels, newLabels);
 writeLabelLog(logFile, inputDatFile, targetDatFile, outputDatFile, ...
     targetLabelsToMap, inputLabels, inputLabelNames, newLabels, newLabelNames, ...
-    mappedRowsByInputLabel, outputLabelTable, repairInfo, fillInfo);
+    mappedRowsByInputLabel, outputLabelTable, repairInfo, holeRepairInfo, fillInfo);
 
 info = struct();
 info.inputMesh = inputMesh;
@@ -277,6 +321,7 @@ info.inputLabels = inputLabels;
 info.targetLabelsToMap = targetLabelsToMap;
 info.repairFallbackTargetLabels = repairFallbackTargetLabels;
 info.fillUnmappedTargetLabels = fillUnmappedTargetLabels;
+info.holeRepairTargetLabels = holeRepairTargetLabels;
 info.newLabels = newLabels;
 info.targetLabelNames = targetLabelNames;
 info.inputLabelNames = inputLabelNames;
@@ -289,6 +334,7 @@ info.candidateTargetRows = candidateTargetRows;
 info.locatedInputElements = locatedInputElements;
 info.candidateInputLabels = candidateInputLabels;
 info.repairInfo = repairInfo;
+info.holeRepairInfo = holeRepairInfo;
 info.fillInfo = fillInfo;
 info.mappedRows = find(mappedTargetLabels ~= targetMesh.elementLabels);
 info.outputDatFile = outputDatFile;
@@ -629,6 +675,93 @@ if any(indices == 0)
 end
 end
 
+function [mappedLabels, holeRepairInfo] = repairUnmappedTargetHolesByNodeVotes( ...
+    targetMesh, mappedLabels, inputLabels, newLabels, holeRepairInfo)
+candidateRows = find(ismember(targetMesh.elementLabels, holeRepairInfo.targetLabels));
+unmappedRows = candidateRows(mappedLabels(candidateRows) == ...
+    targetMesh.elementLabels(candidateRows));
+holeRepairInfo.candidateTargetElements = numel(candidateRows);
+holeRepairInfo.initialUnmappedTargetElements = numel(unmappedRows);
+
+if isempty(unmappedRows)
+    return;
+end
+
+nodeCount = size(targetMesh.nodes, 1);
+newLabelCount = numel(newLabels);
+chunkSize = 250000;
+
+for pass = 1:holeRepairInfo.maxPasses
+    mappedRows = find(ismember(mappedLabels, newLabels));
+    if isempty(mappedRows)
+        break;
+    end
+
+    mappedNodeIds = targetMesh.elements(mappedRows, :);
+    mappedLabelIndices = labelToIndex(mappedLabels(mappedRows), newLabels);
+    nodeVotes = accumarray( ...
+        [mappedNodeIds(:), repelem(mappedLabelIndices, 4)], ...
+        1, [nodeCount, newLabelCount], @sum, 0, true);
+
+    remainingRows = candidateRows(mappedLabels(candidateRows) == ...
+        targetMesh.elementLabels(candidateRows));
+    if isempty(remainingRows)
+        break;
+    end
+
+    [passRows, passLabelIndices] = chooseHoleRepairRows( ...
+        targetMesh.elements, remainingRows, nodeVotes, ...
+        newLabelCount, holeRepairInfo.minNodeVotes, chunkSize);
+    if isempty(passRows)
+        break;
+    end
+
+    mappedLabels(passRows) = newLabels(passLabelIndices);
+    holeRepairInfo.passFilledTargetElements(pass) = numel(passRows);
+    holeRepairInfo.filledTargetElements = holeRepairInfo.filledTargetElements + ...
+        numel(passRows);
+    holeRepairInfo.filledRowsByInputLabel = holeRepairInfo.filledRowsByInputLabel + ...
+        accumarray(passLabelIndices, 1, [numel(inputLabels), 1], @sum, 0);
+end
+end
+
+function [repairRows, repairLabelIndices] = chooseHoleRepairRows( ...
+    elements, candidateRows, nodeVotes, labelCount, minNodeVotes, chunkSize)
+chunkCount = ceil(numel(candidateRows) / chunkSize);
+repairRowChunks = cell(chunkCount, 1);
+repairLabelChunks = cell(chunkCount, 1);
+
+chunkIndex = 0;
+for firstRow = 1:chunkSize:numel(candidateRows)
+    chunkIndex = chunkIndex + 1;
+    lastRow = min(firstRow + chunkSize - 1, numel(candidateRows));
+    rows = candidateRows(firstRow:lastRow);
+    rowNodes = elements(rows, :);
+    voteCounts = zeros(numel(rows), labelCount);
+
+    for labelIndex = 1:labelCount
+        nodeLabelVotes = full(nodeVotes(rowNodes(:), labelIndex));
+        nodeLabelVotes = reshape(nodeLabelVotes, size(rowNodes));
+        voteCounts(:, labelIndex) = sum(nodeLabelVotes, 2);
+    end
+
+    [maxVotes, labelIndices] = max(voteCounts, [], 2);
+    isUniqueWinner = sum(voteCounts == maxVotes, 2) == 1;
+    fillRows = maxVotes >= minNodeVotes & isUniqueWinner;
+
+    repairRowChunks{chunkIndex} = rows(fillRows);
+    repairLabelChunks{chunkIndex} = labelIndices(fillRows);
+end
+
+if chunkIndex == 0
+    repairRows = zeros(0, 1);
+    repairLabelIndices = zeros(0, 1);
+else
+    repairRows = vertcat(repairRowChunks{1:chunkIndex});
+    repairLabelIndices = vertcat(repairLabelChunks{1:chunkIndex});
+end
+end
+
 function [fillInputLabels, fillInfo] = fillTargetRowsBySourceLabels( ...
     inputMesh, targetMesh, targetRows, inputLabels, fillInfo)
 fillInputLabels = zeros(numel(targetRows), 1);
@@ -848,7 +981,7 @@ end
 
 function writeLabelLog(logFile, inputDatFile, targetDatFile, outputDatFile, ...
     targetLabelsToMap, inputLabels, inputLabelNames, newLabels, newLabelNames, ...
-    mappedRowsByInputLabel, outputLabelTable, repairInfo, fillInfo)
+    mappedRowsByInputLabel, outputLabelTable, repairInfo, holeRepairInfo, fillInfo)
 fid = fopen(logFile, 'w');
 if fid < 0
     error('mapDatMeshLabels:LogWriteFailed', 'Could not write log file: %s', logFile);
@@ -913,6 +1046,31 @@ if isfield(repairInfo, 'enabled') && repairInfo.enabled
         fprintf(fid, '  %.15g (%s) repair target elements: %d\n', ...
             inputLabels(labelIndex), char(inputLabelNames(labelIndex)), ...
             repairInfo.repairedRowsByInputLabel(labelIndex));
+    end
+end
+
+if isfield(holeRepairInfo, 'enabled') && holeRepairInfo.enabled
+    fprintf(fid, '\nLocal unmapped-hole repair\n');
+    fprintf(fid, '  Target labels: %s\n', joinNumbers(holeRepairInfo.targetLabels));
+    fprintf(fid, '  Maximum passes: %d\n', holeRepairInfo.maxPasses);
+    fprintf(fid, '  Minimum node votes: %d\n', holeRepairInfo.minNodeVotes);
+    fprintf(fid, '  Candidate target elements: %d\n', ...
+        holeRepairInfo.candidateTargetElements);
+    fprintf(fid, '  Initially unmapped target elements: %d\n', ...
+        holeRepairInfo.initialUnmappedTargetElements);
+    fprintf(fid, '  Filled target elements: %d\n', ...
+        holeRepairInfo.filledTargetElements);
+    for pass = 1:numel(holeRepairInfo.passFilledTargetElements)
+        if holeRepairInfo.passFilledTargetElements(pass) == 0
+            continue;
+        end
+        fprintf(fid, '  Pass %d filled target elements: %d\n', ...
+            pass, holeRepairInfo.passFilledTargetElements(pass));
+    end
+    for labelIndex = 1:numel(inputLabels)
+        fprintf(fid, '  %.15g (%s) hole-repair target elements: %d\n', ...
+            inputLabels(labelIndex), char(inputLabelNames(labelIndex)), ...
+            holeRepairInfo.filledRowsByInputLabel(labelIndex));
     end
 end
 

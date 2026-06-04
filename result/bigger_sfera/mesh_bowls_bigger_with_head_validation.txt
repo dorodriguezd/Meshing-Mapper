@@ -1,0 +1,43 @@
+Bigger sfera head mapping validation
+Original DAT: D:\David\OneDrive - Politecnico di Torino\Documents\Meshing Mapper\input\mesh_bowls_bigger.dat
+Remapped DAT: D:\David\OneDrive - Politecnico di Torino\Documents\Meshing Mapper\result\bigger_sfera\mesh_bowls_bigger_with_head.dat
+
+Block counts
+  Coordinates: original 1164823, remapped 1164823
+  Elements:    original 7043836, remapped 7043836
+  Materials:   original 21, remapped 26
+
+Parsing numeric blocks in remapped DAT...
+  Coordinate, element, and material numeric blocks parsed successfully.
+
+Label 21 element count: 0
+
+Remapped element label counts
+  Label 1: 104354
+  Label 2: 70832
+  Label 3: 22068
+  Label 4: 22154
+  Label 5: 22179
+  Label 6: 22102
+  Label 7: 22091
+  Label 8: 22168
+  Label 9: 22224
+  Label 10: 22042
+  Label 11: 22418
+  Label 12: 22187
+  Label 13: 22275
+  Label 14: 21980
+  Label 15: 22045
+  Label 16: 22159
+  Label 17: 22489
+  Label 18: 22121
+  Label 19: 693623
+  Label 20: 3176651
+  Label 22: 398671
+  Label 23: 119637
+  Label 24: 1527448
+  Label 25: 286976
+  Label 26: 310942
+
+Validation passed.
+Report saved to: D:\David\OneDrive - Politecnico di Torino\Documents\Meshing Mapper\result\bigger_sfera\mesh_bowls_bigger_with_head_validation.txt

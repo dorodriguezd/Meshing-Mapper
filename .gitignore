@@ -4,6 +4,10 @@ validation_plots/
 transform_validation_plots/
 visual_validation_plots/
 HeadMapping/*.dat
+input/*.dat
 result/*.dat
 result/*.png
 result/*.fig
+result/*/*.dat
+result/*/*.png
+result/*/*.fig
