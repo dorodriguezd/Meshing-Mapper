@@ -6,6 +6,7 @@
 clear;
 close all;
 clc;
+addpath(fullfile(pwd, 'Lib'));
 
 datFile = fullfile(pwd, 'New_remap.dat');
 logFile = fullfile(pwd, 'Output_mesh_mapped_input_label_log.txt');

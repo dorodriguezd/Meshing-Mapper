@@ -33,6 +33,8 @@ function [mappedTargetLabels, info] = mapDatMeshLabels(inputDatFile, targetDatFi
 %                        <output name>_label_log.txt.
 %       'Tolerance'      Barycentric tolerance for the fallback point
 %                        locator. Default: 1e-10.
+%       'ChunkSize'      Number of target elements processed at a time for
+%                        centroid point-location. Default: 250000.
 
 parser = inputParser;
 parser.FunctionName = mfilename;
@@ -48,6 +50,7 @@ addParameter(parser, 'PromptForNewLabelNames', false, @(x) islogical(x) && issca
 addParameter(parser, 'OutputDatFile', '', @isTextScalar);
 addParameter(parser, 'LogFile', '', @isTextScalar);
 addParameter(parser, 'Tolerance', 1e-10, @(x) isnumeric(x) && isscalar(x) && x >= 0);
+addParameter(parser, 'ChunkSize', 250000, @(x) isnumeric(x) && isscalar(x) && x > 0);
 parse(parser, inputDatFile, targetDatFile, varargin{:});
 
 inputDatFile = char(parser.Results.inputDatFile);
@@ -127,15 +130,10 @@ if isempty(logFile)
     logFile = fullfile(folder, [name '_label_log.txt']);
 end
 
-candidateTargetRows = find(ismember(targetMesh.elementLabels, targetLabelsToMap));
-candidateCentroids = tetraCentroids(targetMesh.nodes, targetMesh.elements(candidateTargetRows, :));
-locatedInputElements = locatePointsInTets( ...
-    inputMesh.nodes, inputMesh.elements, candidateCentroids, parser.Results.Tolerance);
-
 mappedTargetLabels = targetMesh.elementLabels;
-candidateInputLabels = nan(size(candidateTargetRows));
-insideInput = ~isnan(locatedInputElements);
-candidateInputLabels(insideInput) = inputMesh.elementLabels(locatedInputElements(insideInput));
+candidateTargetRows = find(ismember(targetMesh.elementLabels, targetLabelsToMap));
+[locatedInputElements, candidateInputLabels] = locateTargetRowsInInputMesh( ...
+    inputMesh, targetMesh, candidateTargetRows, parser.Results.Tolerance, parser.Results.ChunkSize);
 
 mappedRowsByInputLabel = zeros(numel(inputLabels), 1);
 for labelIndex = 1:numel(inputLabels)
@@ -269,7 +267,8 @@ nodes = parseNumericBlock(rawLines, coordinatesLine + 2, coordinateCount, 3, 'co
 
 elementCount = parseCount(rawLines{elementsLine + 1}, 'Elements', fileName);
 elementRows = parseNumericBlock(rawLines, elementsLine + 2, elementCount, 5, 'element', fileName);
-elements = elementRows(:, 1:4);
+elementPrefixColumns = elementRows(:, 1:(end - 1));
+elements = elementPrefixColumns(:, 1:4);
 elementLabels = elementRows(:, end);
 
 if any(elements(:) < 1) || any(elements(:) > size(nodes, 1))
@@ -287,6 +286,7 @@ mesh.endCoordinatesLine = endCoordinatesLine;
 mesh.elementsLine = elementsLine;
 mesh.endElementsLine = endElementsLine;
 mesh.nodes = nodes;
+mesh.elementPrefixColumns = elementPrefixColumns;
 mesh.elements = elements;
 mesh.elementLabels = elementLabels;
 mesh.materialLabels = material.labels;
@@ -387,6 +387,60 @@ centroids = (nodes(elements(:, 1), :) + nodes(elements(:, 2), :) + ...
     nodes(elements(:, 3), :) + nodes(elements(:, 4), :)) / 4;
 end
 
+function [locatedInputElements, candidateInputLabels] = locateTargetRowsInInputMesh( ...
+    inputMesh, targetMesh, candidateTargetRows, tolerance, chunkSize)
+locatedInputElements = nan(numel(candidateTargetRows), 1);
+candidateInputLabels = nan(numel(candidateTargetRows), 1);
+if isempty(candidateTargetRows)
+    return;
+end
+
+chunkSize = max(1, floor(chunkSize));
+sourceBoxMin = min(inputMesh.nodes, [], 1) - tolerance;
+sourceBoxMax = max(inputMesh.nodes, [], 1) + tolerance;
+
+usePointLocation = true;
+try
+    sourceTriangulation = triangulation(inputMesh.elements, inputMesh.nodes);
+catch
+    usePointLocation = false;
+    sourceTriangulation = [];
+end
+
+for firstRow = 1:chunkSize:numel(candidateTargetRows)
+    lastRow = min(firstRow + chunkSize - 1, numel(candidateTargetRows));
+    chunkTargetRows = candidateTargetRows(firstRow:lastRow);
+    centroids = tetraCentroids(targetMesh.nodes, targetMesh.elements(chunkTargetRows, :));
+    insideSourceBox = all(centroids >= sourceBoxMin & centroids <= sourceBoxMax, 2);
+    if ~any(insideSourceBox)
+        continue;
+    end
+
+    pointsToLocate = centroids(insideSourceBox, :);
+    if usePointLocation
+        located = pointLocation(sourceTriangulation, pointsToLocate);
+        located = located(:);
+        unresolved = isnan(located);
+        if tolerance > 0 && any(unresolved)
+            located(unresolved) = locatePointsInTets( ...
+                inputMesh.nodes, inputMesh.elements, pointsToLocate(unresolved, :), tolerance);
+        end
+    else
+        located = locatePointsInTets( ...
+            inputMesh.nodes, inputMesh.elements, pointsToLocate, tolerance);
+    end
+
+    localRowsInsideBox = find(insideSourceBox);
+    found = ~isnan(located);
+    if any(found)
+        localRowsFound = localRowsInsideBox(found);
+        candidateRowsFound = firstRow + localRowsFound - 1;
+        locatedInputElements(candidateRowsFound) = located(found);
+        candidateInputLabels(candidateRowsFound) = inputMesh.elementLabels(located(found));
+    end
+end
+end
+
 function elementIndex = locatePointsInTets(nodes, elements, points, tolerance)
 elementIndex = nan(size(points, 1), 1);
 if isempty(points)
@@ -478,9 +532,8 @@ fprintf(fid, 'end Coordinates\n\n');
 fprintf(fid, 'Elements\n');
 fprintf(fid, '%9d\n', size(targetMesh.elements, 1));
 for elem = 1:size(targetMesh.elements, 1)
-    fprintf(fid, '%10d %10d %10d %10d %9d\n', ...
-        targetMesh.elements(elem, 1), targetMesh.elements(elem, 2), ...
-        targetMesh.elements(elem, 3), targetMesh.elements(elem, 4), labels(elem));
+    fprintf(fid, '%10.0f', targetMesh.elementPrefixColumns(elem, :));
+    fprintf(fid, ' %9.0f\n', labels(elem));
 end
 fprintf(fid, 'end Elements\n');
 

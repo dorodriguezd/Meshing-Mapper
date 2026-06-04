@@ -2,6 +2,7 @@
 clear;
 close all;
 clc;
+addpath(fullfile(pwd, 'Lib'));
 
 sourceFile = fullfile(pwd, 'Mesh_elipse.msh');
 targetFile = fullfile(pwd, 'Mesh__cylinder.msh');

@@ -16,6 +16,7 @@
 clear;
 close all;
 clc;
+addpath(fullfile(pwd, 'Lib'));
 
 inputDatFile = fullfile(pwd, 'Input_mesh.dat');
 outputDatFile = fullfile(pwd, 'Output_mesh.dat');

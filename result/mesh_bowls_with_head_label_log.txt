@@ -1,0 +1,42 @@
+Mesh label remapping log
+Created: 2026-06-04 13:01:27
+Input DAT: D:\David\OneDrive - Politecnico di Torino\Documents\Meshing Mapper\HeadMapping\mesh_head.dat
+Target DAT: D:\David\OneDrive - Politecnico di Torino\Documents\Meshing Mapper\HeadMapping\mesh_bowls.dat
+Output DAT: D:\David\OneDrive - Politecnico di Torino\Documents\Meshing Mapper\result\mesh_bowls_with_head.dat
+Target labels searched: 21
+
+Output material labels
+Index | Name
+  1 | target_label_1
+  2 | target_label_2
+  3 | target_label_3
+  4 | target_label_4
+  5 | target_label_5
+  6 | target_label_6
+  7 | target_label_7
+  8 | target_label_8
+  9 | target_label_9
+  10 | target_label_10
+  11 | target_label_11
+  12 | target_label_12
+  13 | target_label_13
+  14 | target_label_14
+  15 | target_label_15
+  16 | target_label_16
+  17 | target_label_17
+  18 | target_label_18
+  19 | target_label_19
+  20 | target_label_20
+  21 | target_label_21
+  22 | gray
+  23 | CSF
+  24 | FAT
+  25 | SKIN
+  26 | SKULL
+
+Old input label -> new output label
+  1 (gray) -> 22 (gray), mapped target elements: 604523
+  2 (CSF) -> 23 (CSF), mapped target elements: 183121
+  3 (FAT) -> 24 (FAT), mapped target elements: 442583
+  4 (SKIN) -> 25 (SKIN), mapped target elements: 46839
+  5 (SKULL) -> 26 (SKULL), mapped target elements: 305306
