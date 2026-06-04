@@ -6,3 +6,4 @@ visual_validation_plots/
 HeadMapping/*.dat
 result/*.dat
 result/*.png
+result/*.fig

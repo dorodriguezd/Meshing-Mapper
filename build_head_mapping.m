@@ -33,9 +33,12 @@ headNames = ["gray"; "CSF"; "FAT"; "SKIN"; "SKULL"];
 % projection. Label 19 is used only as a source-centroid repair fallback for
 % remaining head elements near the lower/boundary region, so every source
 % head element has a chance to be represented without broadly remapping the
-% whole bowl.
+% whole bowl. Any label-21 elements that still remain after those passes are
+% filled from the closest/source-containing head tissue so "sfera interna"
+% does not survive in the output mesh labels.
 targetLabelsToMap = [20 21];
 repairFallbackTargetLabels = 19;
+fillUnmappedTargetLabels = 21;
 
 fprintf('Mapping head tissues onto bowl mesh...\n');
 fprintf('  Source head: %s\n', headDatFile);
@@ -53,7 +56,8 @@ fprintf('  Output mesh: %s\n', outputDatFile);
     'LogFile', logFile, ...
     'ChunkSize', 250000, ...
     'SourceCentroidRepair', true, ...
-    'RepairFallbackTargetLabels', repairFallbackTargetLabels);
+    'RepairFallbackTargetLabels', repairFallbackTargetLabels, ...
+    'FillUnmappedTargetLabels', fillUnmappedTargetLabels);
 
 fprintf('\nHead tissue remap summary:\n');
 for row = 1:height(mapInfo.labelMap)
@@ -77,6 +81,15 @@ if isfield(mapInfo, 'repairInfo') && mapInfo.repairInfo.enabled
     fprintf('  Primary located source elements: %d\n', mapInfo.repairInfo.primaryLocatedSourceElements);
     fprintf('  Fallback newly located source elements: %d\n', ...
         mapInfo.repairInfo.fallbackNewLocatedSourceElements);
+end
+if isfield(mapInfo, 'fillInfo') && mapInfo.fillInfo.enabled
+    fprintf('\nFinal unmapped-target fill:\n');
+    fprintf('  Required target labels: %s\n', mat2str(mapInfo.fillInfo.requestedTargetLabels(:).'));
+    fprintf('  Initially unmapped target elements: %d\n', ...
+        mapInfo.fillInfo.initialUnmappedTargetElements);
+    fprintf('  Filled target elements: %d\n', mapInfo.fillInfo.filledTargetElements);
+    fprintf('  Assigned by nearest source centroid: %d\n', ...
+        mapInfo.fillInfo.assignedByNearestSource);
 end
 
 fprintf('\nDone.\n');

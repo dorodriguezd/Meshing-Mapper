@@ -45,6 +45,12 @@ function [mappedTargetLabels, info] = mapDatMeshLabels(inputDatFile, targetDatFi
 %                        Extra target labels used only by the source-centroid
 %                        repair pass. They are not part of the regular
 %                        target-centroid projection. Default: [].
+%       'FillUnmappedTargetLabels'
+%                        Existing target labels that must not remain after
+%                        mapping. Any still-unmapped elements with these
+%                        labels are assigned from the containing source
+%                        element, or the nearest source centroid when they
+%                        fall outside the source mesh. Default: [].
 
 parser = inputParser;
 parser.FunctionName = mfilename;
@@ -63,6 +69,7 @@ addParameter(parser, 'Tolerance', 1e-10, @(x) isnumeric(x) && isscalar(x) && x >
 addParameter(parser, 'ChunkSize', 250000, @(x) isnumeric(x) && isscalar(x) && x > 0);
 addParameter(parser, 'SourceCentroidRepair', false, @(x) islogical(x) && isscalar(x));
 addParameter(parser, 'RepairFallbackTargetLabels', [], @(x) isnumeric(x) || islogical(x));
+addParameter(parser, 'FillUnmappedTargetLabels', [], @(x) isnumeric(x) || islogical(x));
 parse(parser, inputDatFile, targetDatFile, varargin{:});
 
 inputDatFile = char(parser.Results.inputDatFile);
@@ -100,6 +107,16 @@ if ~isempty(repairFallbackTargetLabels)
         error('mapDatMeshLabels:MissingFallbackTargetLabels', ...
             'Repair fallback target labels not found in %s: %s', ...
             targetDatFile, joinNumbers(missingFallbackLabels));
+    end
+end
+
+fillUnmappedTargetLabels = numericColumn(parser.Results.FillUnmappedTargetLabels);
+if ~isempty(fillUnmappedTargetLabels)
+    missingFillLabels = setdiff(fillUnmappedTargetLabels, unique(targetMesh.elementLabels));
+    if ~isempty(missingFillLabels)
+        error('mapDatMeshLabels:MissingFillTargetLabels', ...
+            'Fill-unmapped target labels not found in %s: %s', ...
+            targetDatFile, joinNumbers(missingFillLabels));
     end
 end
 
@@ -217,10 +234,41 @@ if parser.Results.SourceCentroidRepair
     end
 end
 
+fillInfo = struct();
+fillInfo.enabled = ~isempty(fillUnmappedTargetLabels);
+fillInfo.requestedTargetLabels = fillUnmappedTargetLabels;
+fillInfo.candidateTargetElements = 0;
+fillInfo.initialUnmappedTargetElements = 0;
+fillInfo.filledTargetElements = 0;
+fillInfo.assignedBySourceContainment = 0;
+fillInfo.assignedByNearestSource = 0;
+fillInfo.filledRowsByInputLabel = zeros(numel(inputLabels), 1);
+if ~isempty(fillUnmappedTargetLabels)
+    fillCandidateRows = find(ismember(targetMesh.elementLabels, fillUnmappedTargetLabels));
+    fillRows = fillCandidateRows(mappedTargetLabels(fillCandidateRows) == ...
+        targetMesh.elementLabels(fillCandidateRows));
+    fillInfo.candidateTargetElements = numel(fillCandidateRows);
+    fillInfo.initialUnmappedTargetElements = numel(fillRows);
+
+    if ~isempty(fillRows)
+        [fillInputLabels, fillInfo] = fillTargetRowsBySourceLabels( ...
+            inputMesh, targetMesh, fillRows, inputLabels, fillInfo);
+        for labelIndex = 1:numel(inputLabels)
+            rowsForLabel = fillRows(fillInputLabels == inputLabels(labelIndex));
+            mappedTargetLabels(rowsForLabel) = newLabels(labelIndex);
+            fillInfo.filledRowsByInputLabel(labelIndex) = numel(rowsForLabel);
+        end
+
+        for labelIndex = 1:numel(inputLabels)
+            mappedRowsByInputLabel(labelIndex) = nnz(mappedTargetLabels == newLabels(labelIndex));
+        end
+    end
+end
+
 writeProblemDatMesh(outputDatFile, targetMesh, mappedTargetLabels, inputMesh, inputLabels, newLabels);
 writeLabelLog(logFile, inputDatFile, targetDatFile, outputDatFile, ...
     targetLabelsToMap, inputLabels, inputLabelNames, newLabels, newLabelNames, ...
-    mappedRowsByInputLabel, outputLabelTable, repairInfo);
+    mappedRowsByInputLabel, outputLabelTable, repairInfo, fillInfo);
 
 info = struct();
 info.inputMesh = inputMesh;
@@ -228,6 +276,7 @@ info.targetMesh = targetMesh;
 info.inputLabels = inputLabels;
 info.targetLabelsToMap = targetLabelsToMap;
 info.repairFallbackTargetLabels = repairFallbackTargetLabels;
+info.fillUnmappedTargetLabels = fillUnmappedTargetLabels;
 info.newLabels = newLabels;
 info.targetLabelNames = targetLabelNames;
 info.inputLabelNames = inputLabelNames;
@@ -240,6 +289,7 @@ info.candidateTargetRows = candidateTargetRows;
 info.locatedInputElements = locatedInputElements;
 info.candidateInputLabels = candidateInputLabels;
 info.repairInfo = repairInfo;
+info.fillInfo = fillInfo;
 info.mappedRows = find(mappedTargetLabels ~= targetMesh.elementLabels);
 info.outputDatFile = outputDatFile;
 info.logFile = logFile;
@@ -579,6 +629,72 @@ if any(indices == 0)
 end
 end
 
+function [fillInputLabels, fillInfo] = fillTargetRowsBySourceLabels( ...
+    inputMesh, targetMesh, targetRows, inputLabels, fillInfo)
+fillInputLabels = zeros(numel(targetRows), 1);
+if isempty(targetRows)
+    return;
+end
+
+sourceRows = find(ismember(inputMesh.elementLabels, inputLabels));
+if isempty(sourceRows)
+    error('mapDatMeshLabels:NoFillSourceElements', ...
+        'Cannot fill target labels because no source elements match InputLabels.');
+end
+
+sourceCentroids = tetraCentroids(inputMesh.nodes, inputMesh.elements(sourceRows, :));
+sourceLabels = inputMesh.elementLabels(sourceRows);
+targetCentroids = tetraCentroids(targetMesh.nodes, targetMesh.elements(targetRows, :));
+
+try
+    sourceTriangulation = triangulation(inputMesh.elements(sourceRows, :), inputMesh.nodes);
+    sourceContainingRows = pointLocation(sourceTriangulation, targetCentroids);
+    sourceContainingRows = sourceContainingRows(:);
+catch
+    sourceContainingRows = nan(numel(targetRows), 1);
+end
+
+insideSource = ~isnan(sourceContainingRows);
+if any(insideSource)
+    fillInputLabels(insideSource) = sourceLabels(sourceContainingRows(insideSource));
+end
+
+needsNearest = find(fillInputLabels == 0);
+if ~isempty(needsNearest)
+    nearestSourceRows = nearestSourceCentroidRows( ...
+        sourceCentroids, targetCentroids(needsNearest, :));
+    fillInputLabels(needsNearest) = sourceLabels(nearestSourceRows);
+end
+
+fillInfo.filledTargetElements = numel(targetRows);
+fillInfo.assignedBySourceContainment = nnz(insideSource);
+fillInfo.assignedByNearestSource = numel(needsNearest);
+end
+
+function nearestRows = nearestSourceCentroidRows(sourceCentroids, queryCentroids)
+if exist('KDTreeSearcher', 'file') == 2
+    searcher = KDTreeSearcher(sourceCentroids);
+    nearestRows = knnsearch(searcher, queryCentroids);
+elseif exist('dsearchn', 'file') == 2
+    nearestRows = dsearchn(sourceCentroids, queryCentroids);
+else
+    nearestRows = nearestRowsByChunks(sourceCentroids, queryCentroids, 100);
+end
+nearestRows = nearestRows(:);
+end
+
+function nearestRows = nearestRowsByChunks(sourceCentroids, queryCentroids, chunkSize)
+nearestRows = zeros(size(queryCentroids, 1), 1);
+for firstRow = 1:chunkSize:size(queryCentroids, 1)
+    lastRow = min(firstRow + chunkSize - 1, size(queryCentroids, 1));
+    queryChunk = queryCentroids(firstRow:lastRow, :);
+    for queryIndex = 1:size(queryChunk, 1)
+        deltas = sourceCentroids - queryChunk(queryIndex, :);
+        [~, nearestRows(firstRow + queryIndex - 1)] = min(sum(deltas.^2, 2));
+    end
+end
+end
+
 function elementIndex = locatePointsInTets(nodes, elements, points, tolerance)
 elementIndex = nan(size(points, 1), 1);
 if isempty(points)
@@ -685,7 +801,8 @@ end
 function suffixLines = replaceMaterialProperties(suffixLines, targetMesh, inputMesh, inputLabels, newLabels)
 startLine = find(strcmpi(strtrim(suffixLines), 'Material properties'), 1, 'first');
 if isempty(startLine)
-    suffixLines = [suffixLines; buildMaterialPropertyLines(targetMesh, inputMesh, inputLabels, newLabels)];
+    suffixLines = [suffixLines; {''}; ...
+        buildMaterialPropertyLines(targetMesh, inputMesh, inputLabels, newLabels)];
     return;
 end
 
@@ -719,20 +836,19 @@ for labelIndex = 1:numel(inputLabels)
 end
 
 rows = [rows; newRows];
-lines = cell(size(rows, 1) + 4, 1);
-lines{1} = '';
-lines{2} = 'Material properties';
-lines{3} = sprintf('%9d', size(rows, 1));
-lines{4} = targetMesh.materialComment;
+lines = cell(size(rows, 1) + 3, 1);
+lines{1} = 'Material properties';
+lines{2} = sprintf('%9d', size(rows, 1));
+lines{3} = targetMesh.materialComment;
 for row = 1:size(rows, 1)
-    lines{row + 4} = sprintf('%9d %15.9f %15.9f %15.9f %15.9f %15.9f', ...
+    lines{row + 3} = sprintf('%9d %15.9f %15.9f %15.9f %15.9f %15.9f', ...
         rows(row, 1), rows(row, 2), rows(row, 3), rows(row, 4), rows(row, 5), rows(row, 6));
 end
 end
 
 function writeLabelLog(logFile, inputDatFile, targetDatFile, outputDatFile, ...
     targetLabelsToMap, inputLabels, inputLabelNames, newLabels, newLabelNames, ...
-    mappedRowsByInputLabel, outputLabelTable, repairInfo)
+    mappedRowsByInputLabel, outputLabelTable, repairInfo, fillInfo)
 fid = fopen(logFile, 'w');
 if fid < 0
     error('mapDatMeshLabels:LogWriteFailed', 'Could not write log file: %s', logFile);
@@ -797,6 +913,27 @@ if isfield(repairInfo, 'enabled') && repairInfo.enabled
         fprintf(fid, '  %.15g (%s) repair target elements: %d\n', ...
             inputLabels(labelIndex), char(inputLabelNames(labelIndex)), ...
             repairInfo.repairedRowsByInputLabel(labelIndex));
+    end
+end
+
+if isfield(fillInfo, 'enabled') && fillInfo.enabled
+    fprintf(fid, '\nFinal unmapped-target fill\n');
+    fprintf(fid, '  Required target labels: %s\n', ...
+        joinNumbers(fillInfo.requestedTargetLabels));
+    fprintf(fid, '  Candidate target elements: %d\n', ...
+        fillInfo.candidateTargetElements);
+    fprintf(fid, '  Initially unmapped target elements: %d\n', ...
+        fillInfo.initialUnmappedTargetElements);
+    fprintf(fid, '  Filled target elements: %d\n', ...
+        fillInfo.filledTargetElements);
+    fprintf(fid, '  Assigned by source containment: %d\n', ...
+        fillInfo.assignedBySourceContainment);
+    fprintf(fid, '  Assigned by nearest source centroid: %d\n', ...
+        fillInfo.assignedByNearestSource);
+    for labelIndex = 1:numel(inputLabels)
+        fprintf(fid, '  %.15g (%s) fill target elements: %d\n', ...
+            inputLabels(labelIndex), char(inputLabelNames(labelIndex)), ...
+            fillInfo.filledRowsByInputLabel(labelIndex));
     end
 end
 end

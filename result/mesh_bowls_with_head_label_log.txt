@@ -1,5 +1,5 @@
 Mesh label remapping log
-Created: 2026-06-04 16:18:48
+Created: 2026-06-04 18:19:46
 Input DAT: D:\David\OneDrive - Politecnico di Torino\Documents\Meshing Mapper\HeadMapping\mesh_head.dat
 Target DAT: D:\David\OneDrive - Politecnico di Torino\Documents\Meshing Mapper\HeadMapping\mesh_bowls.dat
 Output DAT: D:\David\OneDrive - Politecnico di Torino\Documents\Meshing Mapper\result\mesh_bowls_with_head.dat
@@ -38,7 +38,7 @@ Old input label -> new output label
   1 (gray) -> 22 (gray), mapped target elements: 604019
   2 (CSF) -> 23 (CSF), mapped target elements: 186248
   3 (FAT) -> 24 (FAT), mapped target elements: 1102523
-  4 (SKIN) -> 25 (SKIN), mapped target elements: 237760
+  4 (SKIN) -> 25 (SKIN), mapped target elements: 244830
   5 (SKULL) -> 26 (SKULL), mapped target elements: 372000
 
 Source-centroid repair
@@ -58,3 +58,16 @@ Source-centroid repair
   3 (FAT) repair target elements: 196731
   4 (SKIN) repair target elements: 66987
   5 (SKULL) repair target elements: 161310
+
+Final unmapped-target fill
+  Required target labels: 21
+  Candidate target elements: 1589484
+  Initially unmapped target elements: 7070
+  Filled target elements: 7070
+  Assigned by source containment: 0
+  Assigned by nearest source centroid: 7070
+  1 (gray) fill target elements: 0
+  2 (CSF) fill target elements: 0
+  3 (FAT) fill target elements: 0
+  4 (SKIN) fill target elements: 7070
+  5 (SKULL) fill target elements: 0
