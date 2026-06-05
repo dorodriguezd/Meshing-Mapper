@@ -60,6 +60,14 @@ function [mappedTargetLabels, info] = mapDatMeshLabels(inputDatFile, targetDatFi
 %       'HoleRepairMinNodeVotes'
 %                        Minimum shared-node tissue votes needed to fill an
 %                        unmapped target element. Default: 4.
+%       'TargetSurfaceDistanceFilterLabels'
+%                        Existing target labels whose candidate centroids
+%                        must be close to the external surface nodes of the
+%                        selected input mesh. Other target labels are not
+%                        distance-filtered. Default: [].
+%       'TargetSurfaceDistance'
+%                        Maximum distance used by
+%                        TargetSurfaceDistanceFilterLabels. Default: Inf.
 
 parser = inputParser;
 parser.FunctionName = mfilename;
@@ -82,6 +90,8 @@ addParameter(parser, 'FillUnmappedTargetLabels', [], @(x) isnumeric(x) || islogi
 addParameter(parser, 'HoleRepairTargetLabels', [], @(x) isnumeric(x) || islogical(x));
 addParameter(parser, 'HoleRepairMaxPasses', 0, @(x) isnumeric(x) && isscalar(x) && x >= 0);
 addParameter(parser, 'HoleRepairMinNodeVotes', 4, @(x) isnumeric(x) && isscalar(x) && x > 0);
+addParameter(parser, 'TargetSurfaceDistanceFilterLabels', [], @(x) isnumeric(x) || islogical(x));
+addParameter(parser, 'TargetSurfaceDistance', inf, @(x) isnumeric(x) && isscalar(x) && x >= 0);
 parse(parser, inputDatFile, targetDatFile, varargin{:});
 
 inputDatFile = char(parser.Results.inputDatFile);
@@ -144,6 +154,19 @@ end
 holeRepairMaxPasses = floor(parser.Results.HoleRepairMaxPasses);
 holeRepairMinNodeVotes = floor(parser.Results.HoleRepairMinNodeVotes);
 
+targetSurfaceDistanceFilterLabels = numericColumn( ...
+    parser.Results.TargetSurfaceDistanceFilterLabels);
+if ~isempty(targetSurfaceDistanceFilterLabels)
+    missingSurfaceFilterLabels = setdiff( ...
+        targetSurfaceDistanceFilterLabels, unique(targetMesh.elementLabels));
+    if ~isempty(missingSurfaceFilterLabels)
+        error('mapDatMeshLabels:MissingSurfaceFilterTargetLabels', ...
+            'Surface-distance target labels not found in %s: %s', ...
+            targetDatFile, joinNumbers(missingSurfaceFilterLabels));
+    end
+end
+targetSurfaceDistance = parser.Results.TargetSurfaceDistance;
+
 newLabels = numericColumn(parser.Results.NewLabels);
 if isempty(newLabels)
     existingLabels = unique([targetMesh.elementLabels; targetMesh.materialLabels]);
@@ -195,6 +218,22 @@ end
 
 mappedTargetLabels = targetMesh.elementLabels;
 candidateTargetRows = find(ismember(targetMesh.elementLabels, targetLabelsToMap));
+surfaceFilterInfo = struct();
+surfaceFilterInfo.enabled = ~isempty(targetSurfaceDistanceFilterLabels) && ...
+    isfinite(targetSurfaceDistance);
+surfaceFilterInfo.labels = targetSurfaceDistanceFilterLabels;
+surfaceFilterInfo.maxDistance = targetSurfaceDistance;
+surfaceFilterInfo.initialCandidateElements = numel(candidateTargetRows);
+surfaceFilterInfo.filteredLabelCandidateElements = 0;
+surfaceFilterInfo.keptFilteredLabelElements = 0;
+surfaceFilterInfo.removedFilteredLabelElements = 0;
+surfaceFilterInfo.surfaceNodeCount = 0;
+if surfaceFilterInfo.enabled
+    [candidateTargetRows, surfaceFilterInfo] = filterTargetRowsByInputSurfaceDistance( ...
+        inputMesh, targetMesh, candidateTargetRows, inputLabels, ...
+        targetSurfaceDistanceFilterLabels, targetSurfaceDistance, ...
+        parser.Results.ChunkSize, surfaceFilterInfo);
+end
 [locatedInputElements, candidateInputLabels] = locateTargetRowsInInputMesh( ...
     inputMesh, targetMesh, candidateTargetRows, parser.Results.Tolerance, parser.Results.ChunkSize);
 
@@ -312,7 +351,8 @@ end
 writeProblemDatMesh(outputDatFile, targetMesh, mappedTargetLabels, inputMesh, inputLabels, newLabels);
 writeLabelLog(logFile, inputDatFile, targetDatFile, outputDatFile, ...
     targetLabelsToMap, inputLabels, inputLabelNames, newLabels, newLabelNames, ...
-    mappedRowsByInputLabel, outputLabelTable, repairInfo, holeRepairInfo, fillInfo);
+    mappedRowsByInputLabel, outputLabelTable, surfaceFilterInfo, ...
+    repairInfo, holeRepairInfo, fillInfo);
 
 info = struct();
 info.inputMesh = inputMesh;
@@ -322,6 +362,8 @@ info.targetLabelsToMap = targetLabelsToMap;
 info.repairFallbackTargetLabels = repairFallbackTargetLabels;
 info.fillUnmappedTargetLabels = fillUnmappedTargetLabels;
 info.holeRepairTargetLabels = holeRepairTargetLabels;
+info.targetSurfaceDistanceFilterLabels = targetSurfaceDistanceFilterLabels;
+info.targetSurfaceDistance = targetSurfaceDistance;
 info.newLabels = newLabels;
 info.targetLabelNames = targetLabelNames;
 info.inputLabelNames = inputLabelNames;
@@ -336,6 +378,7 @@ info.candidateInputLabels = candidateInputLabels;
 info.repairInfo = repairInfo;
 info.holeRepairInfo = holeRepairInfo;
 info.fillInfo = fillInfo;
+info.surfaceFilterInfo = surfaceFilterInfo;
 info.mappedRows = find(mappedTargetLabels ~= targetMesh.elementLabels);
 info.outputDatFile = outputDatFile;
 info.logFile = logFile;
@@ -556,6 +599,88 @@ end
 function centroids = tetraCentroids(nodes, elements)
 centroids = (nodes(elements(:, 1), :) + nodes(elements(:, 2), :) + ...
     nodes(elements(:, 3), :) + nodes(elements(:, 4), :)) / 4;
+end
+
+function [candidateTargetRows, filterInfo] = filterTargetRowsByInputSurfaceDistance( ...
+    inputMesh, targetMesh, candidateTargetRows, inputLabels, filterLabels, ...
+    maxDistance, chunkSize, filterInfo)
+candidateFilterMask = ismember(targetMesh.elementLabels(candidateTargetRows), filterLabels);
+filterInfo.filteredLabelCandidateElements = nnz(candidateFilterMask);
+if ~any(candidateFilterMask)
+    return;
+end
+
+surfaceNodeIds = inputSurfaceNodeIds(inputMesh, inputLabels);
+surfacePoints = inputMesh.nodes(surfaceNodeIds, :);
+filterInfo.surfaceNodeCount = numel(surfaceNodeIds);
+
+filteredRows = candidateTargetRows(candidateFilterMask);
+keepFilteredRows = false(numel(filteredRows), 1);
+chunkSize = max(1, floor(chunkSize));
+for firstRow = 1:chunkSize:numel(filteredRows)
+    lastRow = min(firstRow + chunkSize - 1, numel(filteredRows));
+    rows = filteredRows(firstRow:lastRow);
+    centroids = tetraCentroids(targetMesh.nodes, targetMesh.elements(rows, :));
+    distances = nearestPointDistances(surfacePoints, centroids);
+    keepFilteredRows(firstRow:lastRow) = distances <= maxDistance;
+end
+
+keepCandidateRows = ~candidateFilterMask;
+keepCandidateRows(candidateFilterMask) = keepFilteredRows;
+candidateTargetRows = candidateTargetRows(keepCandidateRows);
+
+filterInfo.keptFilteredLabelElements = nnz(keepFilteredRows);
+filterInfo.removedFilteredLabelElements = ...
+    filterInfo.filteredLabelCandidateElements - filterInfo.keptFilteredLabelElements;
+end
+
+function surfaceNodeIds = inputSurfaceNodeIds(inputMesh, inputLabels)
+selectedRows = find(ismember(inputMesh.elementLabels, inputLabels));
+if isempty(selectedRows)
+    error('mapDatMeshLabels:NoInputSurfaceElements', ...
+        'No input elements are available to define the surface-distance filter.');
+end
+
+[activeNodeIds, ~, compactConnectivity] = unique(inputMesh.elements(selectedRows, :));
+compactConnectivity = reshape(compactConnectivity, numel(selectedRows), 4);
+surfaceFaces = freeBoundary(triangulation( ...
+    compactConnectivity, inputMesh.nodes(activeNodeIds, :)));
+if isempty(surfaceFaces)
+    error('mapDatMeshLabels:NoInputSurfaceBoundary', ...
+        'Could not compute an input surface for the surface-distance filter.');
+end
+
+surfaceNodeIds = activeNodeIds(unique(surfaceFaces(:)));
+end
+
+function distances = nearestPointDistances(referencePoints, queryPoints)
+if isempty(queryPoints)
+    distances = zeros(0, 1);
+    return;
+end
+
+if exist('KDTreeSearcher', 'file') == 2
+    searcher = KDTreeSearcher(referencePoints);
+    [~, distances] = knnsearch(searcher, queryPoints);
+elseif exist('dsearchn', 'file') == 2
+    nearestRows = dsearchn(referencePoints, queryPoints);
+    distances = sqrt(sum((queryPoints - referencePoints(nearestRows, :)).^2, 2));
+else
+    distances = nearestPointDistancesByChunks(referencePoints, queryPoints, 100);
+end
+distances = distances(:);
+end
+
+function distances = nearestPointDistancesByChunks(referencePoints, queryPoints, chunkSize)
+distances = zeros(size(queryPoints, 1), 1);
+for firstRow = 1:chunkSize:size(queryPoints, 1)
+    lastRow = min(firstRow + chunkSize - 1, size(queryPoints, 1));
+    queryChunk = queryPoints(firstRow:lastRow, :);
+    for queryIndex = 1:size(queryChunk, 1)
+        deltas = referencePoints - queryChunk(queryIndex, :);
+        distances(firstRow + queryIndex - 1) = sqrt(min(sum(deltas.^2, 2)));
+    end
+end
 end
 
 function [locatedInputElements, candidateInputLabels] = locateTargetRowsInInputMesh( ...
@@ -981,7 +1106,8 @@ end
 
 function writeLabelLog(logFile, inputDatFile, targetDatFile, outputDatFile, ...
     targetLabelsToMap, inputLabels, inputLabelNames, newLabels, newLabelNames, ...
-    mappedRowsByInputLabel, outputLabelTable, repairInfo, holeRepairInfo, fillInfo)
+    mappedRowsByInputLabel, outputLabelTable, surfaceFilterInfo, ...
+    repairInfo, holeRepairInfo, fillInfo)
 fid = fopen(logFile, 'w');
 if fid < 0
     error('mapDatMeshLabels:LogWriteFailed', 'Could not write log file: %s', logFile);
@@ -1009,6 +1135,24 @@ for labelIndex = 1:numel(inputLabels)
         inputLabels(labelIndex), char(inputLabelNames(labelIndex)), ...
         newLabels(labelIndex), char(newLabelNames(labelIndex)), ...
         mappedRowsByInputLabel(labelIndex));
+end
+
+if isfield(surfaceFilterInfo, 'enabled') && surfaceFilterInfo.enabled
+    fprintf(fid, '\nTarget surface-distance filter\n');
+    fprintf(fid, '  Filtered target labels: %s\n', ...
+        joinNumbers(surfaceFilterInfo.labels));
+    fprintf(fid, '  Maximum surface distance: %.15g\n', ...
+        surfaceFilterInfo.maxDistance);
+    fprintf(fid, '  Initial candidate target elements: %d\n', ...
+        surfaceFilterInfo.initialCandidateElements);
+    fprintf(fid, '  Filtered-label candidate elements: %d\n', ...
+        surfaceFilterInfo.filteredLabelCandidateElements);
+    fprintf(fid, '  Kept filtered-label elements: %d\n', ...
+        surfaceFilterInfo.keptFilteredLabelElements);
+    fprintf(fid, '  Removed filtered-label elements: %d\n', ...
+        surfaceFilterInfo.removedFilteredLabelElements);
+    fprintf(fid, '  Input surface nodes: %d\n', ...
+        surfaceFilterInfo.surfaceNodeCount);
 end
 
 if isfield(repairInfo, 'enabled') && repairInfo.enabled
