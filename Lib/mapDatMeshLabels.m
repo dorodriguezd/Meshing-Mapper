@@ -68,6 +68,9 @@ function [mappedTargetLabels, info] = mapDatMeshLabels(inputDatFile, targetDatFi
 %       'TargetSurfaceDistance'
 %                        Maximum distance used by
 %                        TargetSurfaceDistanceFilterLabels. Default: Inf.
+%       'UseParallel'    Process independent mapping chunks with parfor when
+%                        Parallel Computing Toolbox is available. Default:
+%                        false.
 
 parser = inputParser;
 parser.FunctionName = mfilename;
@@ -92,6 +95,7 @@ addParameter(parser, 'HoleRepairMaxPasses', 0, @(x) isnumeric(x) && isscalar(x) 
 addParameter(parser, 'HoleRepairMinNodeVotes', 4, @(x) isnumeric(x) && isscalar(x) && x > 0);
 addParameter(parser, 'TargetSurfaceDistanceFilterLabels', [], @(x) isnumeric(x) || islogical(x));
 addParameter(parser, 'TargetSurfaceDistance', inf, @(x) isnumeric(x) && isscalar(x) && x >= 0);
+addParameter(parser, 'UseParallel', false, @(x) islogical(x) && isscalar(x));
 parse(parser, inputDatFile, targetDatFile, varargin{:});
 
 inputDatFile = char(parser.Results.inputDatFile);
@@ -99,6 +103,12 @@ targetDatFile = char(parser.Results.targetDatFile);
 
 inputMesh = readProblemDatMesh(inputDatFile);
 targetMesh = readProblemDatMesh(targetDatFile);
+
+optimizationInfo = struct();
+optimizationInfo.useParallelRequested = parser.Results.UseParallel;
+optimizationInfo.useParallel = resolveParallelExecution(parser.Results.UseParallel);
+optimizationInfo.mexPointLocatorAvailable = exist('locatePointsInTetsMex', 'file') == 3;
+optimizationInfo.mexExtension = mexext;
 
 inputLabels = numericColumn(parser.Results.InputLabels);
 if isempty(inputLabels)
@@ -232,10 +242,11 @@ if surfaceFilterInfo.enabled
     [candidateTargetRows, surfaceFilterInfo] = filterTargetRowsByInputSurfaceDistance( ...
         inputMesh, targetMesh, candidateTargetRows, inputLabels, ...
         targetSurfaceDistanceFilterLabels, targetSurfaceDistance, ...
-        parser.Results.ChunkSize, surfaceFilterInfo);
+        parser.Results.ChunkSize, surfaceFilterInfo, optimizationInfo.useParallel);
 end
 [locatedInputElements, candidateInputLabels] = locateTargetRowsInInputMesh( ...
-    inputMesh, targetMesh, candidateTargetRows, parser.Results.Tolerance, parser.Results.ChunkSize);
+    inputMesh, targetMesh, candidateTargetRows, parser.Results.Tolerance, ...
+    parser.Results.ChunkSize, optimizationInfo.useParallel);
 
 mappedRowsByInputLabel = zeros(numel(inputLabels), 1);
 for labelIndex = 1:numel(inputLabels)
@@ -310,7 +321,7 @@ holeRepairInfo.passFilledTargetElements = zeros(holeRepairMaxPasses, 1);
 if holeRepairInfo.enabled
     [mappedTargetLabels, holeRepairInfo] = repairUnmappedTargetHolesByNodeVotes( ...
         targetMesh, mappedTargetLabels, inputLabels, newLabels, ...
-        holeRepairInfo);
+        holeRepairInfo, optimizationInfo.useParallel);
 
     for labelIndex = 1:numel(inputLabels)
         mappedRowsByInputLabel(labelIndex) = nnz(mappedTargetLabels == newLabels(labelIndex));
@@ -352,7 +363,7 @@ writeProblemDatMesh(outputDatFile, targetMesh, mappedTargetLabels, inputMesh, in
 writeLabelLog(logFile, inputDatFile, targetDatFile, outputDatFile, ...
     targetLabelsToMap, inputLabels, inputLabelNames, newLabels, newLabelNames, ...
     mappedRowsByInputLabel, outputLabelTable, surfaceFilterInfo, ...
-    repairInfo, holeRepairInfo, fillInfo);
+    repairInfo, holeRepairInfo, fillInfo, optimizationInfo);
 
 info = struct();
 info.inputMesh = inputMesh;
@@ -379,6 +390,7 @@ info.repairInfo = repairInfo;
 info.holeRepairInfo = holeRepairInfo;
 info.fillInfo = fillInfo;
 info.surfaceFilterInfo = surfaceFilterInfo;
+info.optimizationInfo = optimizationInfo;
 info.mappedRows = find(mappedTargetLabels ~= targetMesh.elementLabels);
 info.outputDatFile = outputDatFile;
 info.logFile = logFile;
@@ -391,6 +403,35 @@ end
 
 function tf = isTextVector(value)
 tf = isempty(value) || ischar(value) || isstring(value) || iscellstr(value);
+end
+
+function useParallel = resolveParallelExecution(requested)
+useParallel = false;
+if ~requested
+    return;
+end
+
+if exist('parpool', 'file') ~= 2 || license('test', 'Distrib_Computing_Toolbox') ~= 1
+    warning('mapDatMeshLabels:ParallelUnavailable', ...
+        'UseParallel was requested, but Parallel Computing Toolbox is not available.');
+    return;
+end
+
+try
+    pool = gcp('nocreate');
+    if isempty(pool)
+        try
+            pool = parpool('threads');
+        catch
+            pool = parpool;
+        end
+    end
+    useParallel = pool.NumWorkers > 1;
+catch exception
+    warning('mapDatMeshLabels:ParallelStartupFailed', ...
+        'UseParallel was requested, but a parallel pool could not be started: %s', ...
+        exception.message);
+end
 end
 
 function values = numericColumn(values)
@@ -603,7 +644,7 @@ end
 
 function [candidateTargetRows, filterInfo] = filterTargetRowsByInputSurfaceDistance( ...
     inputMesh, targetMesh, candidateTargetRows, inputLabels, filterLabels, ...
-    maxDistance, chunkSize, filterInfo)
+    maxDistance, chunkSize, filterInfo, useParallel)
 candidateFilterMask = ismember(targetMesh.elementLabels(candidateTargetRows), filterLabels);
 filterInfo.filteredLabelCandidateElements = nnz(candidateFilterMask);
 if ~any(candidateFilterMask)
@@ -615,15 +656,32 @@ surfacePoints = inputMesh.nodes(surfaceNodeIds, :);
 filterInfo.surfaceNodeCount = numel(surfaceNodeIds);
 
 filteredRows = candidateTargetRows(candidateFilterMask);
-keepFilteredRows = false(numel(filteredRows), 1);
 chunkSize = max(1, floor(chunkSize));
-for firstRow = 1:chunkSize:numel(filteredRows)
-    lastRow = min(firstRow + chunkSize - 1, numel(filteredRows));
-    rows = filteredRows(firstRow:lastRow);
-    centroids = tetraCentroids(targetMesh.nodes, targetMesh.elements(rows, :));
-    distances = nearestPointDistances(surfacePoints, centroids);
-    keepFilteredRows(firstRow:lastRow) = distances <= maxDistance;
+chunkStarts = 1:chunkSize:numel(filteredRows);
+keepChunks = cell(numel(chunkStarts), 1);
+targetNodes = targetMesh.nodes;
+targetElements = targetMesh.elements;
+
+if useParallel && numel(chunkStarts) > 1
+    parfor chunkIndex = 1:numel(chunkStarts)
+        firstRow = chunkStarts(chunkIndex);
+        lastRow = min(firstRow + chunkSize - 1, numel(filteredRows));
+        rows = filteredRows(firstRow:lastRow);
+        centroids = tetraCentroids(targetNodes, targetElements(rows, :)); %#ok<PFBNS>
+        distances = nearestPointDistances(surfacePoints, centroids);
+        keepChunks{chunkIndex} = distances <= maxDistance;
+    end
+else
+    for chunkIndex = 1:numel(chunkStarts)
+        firstRow = chunkStarts(chunkIndex);
+        lastRow = min(firstRow + chunkSize - 1, numel(filteredRows));
+        rows = filteredRows(firstRow:lastRow);
+        centroids = tetraCentroids(targetNodes, targetElements(rows, :));
+        distances = nearestPointDistances(surfacePoints, centroids);
+        keepChunks{chunkIndex} = distances <= maxDistance;
+    end
 end
+keepFilteredRows = vertcat(keepChunks{:});
 
 keepCandidateRows = ~candidateFilterMask;
 keepCandidateRows(candidateFilterMask) = keepFilteredRows;
@@ -684,7 +742,7 @@ end
 end
 
 function [locatedInputElements, candidateInputLabels] = locateTargetRowsInInputMesh( ...
-    inputMesh, targetMesh, candidateTargetRows, tolerance, chunkSize)
+    inputMesh, targetMesh, candidateTargetRows, tolerance, chunkSize, useParallel)
 locatedInputElements = nan(numel(candidateTargetRows), 1);
 candidateInputLabels = nan(numel(candidateTargetRows), 1);
 if isempty(candidateTargetRows)
@@ -703,37 +761,65 @@ catch
     sourceTriangulation = [];
 end
 
-for firstRow = 1:chunkSize:numel(candidateTargetRows)
-    lastRow = min(firstRow + chunkSize - 1, numel(candidateTargetRows));
-    chunkTargetRows = candidateTargetRows(firstRow:lastRow);
-    centroids = tetraCentroids(targetMesh.nodes, targetMesh.elements(chunkTargetRows, :));
-    insideSourceBox = all(centroids >= sourceBoxMin & centroids <= sourceBoxMax, 2);
-    if ~any(insideSourceBox)
-        continue;
-    end
+chunkStarts = 1:chunkSize:numel(candidateTargetRows);
+locatedChunks = cell(numel(chunkStarts), 1);
+labelChunks = cell(numel(chunkStarts), 1);
 
-    pointsToLocate = centroids(insideSourceBox, :);
-    if usePointLocation
-        located = pointLocation(sourceTriangulation, pointsToLocate);
-        located = located(:);
-        unresolved = isnan(located);
-        if tolerance > 0 && any(unresolved)
-            located(unresolved) = locatePointsInTets( ...
-                inputMesh.nodes, inputMesh.elements, pointsToLocate(unresolved, :), tolerance);
-        end
-    else
-        located = locatePointsInTets( ...
-            inputMesh.nodes, inputMesh.elements, pointsToLocate, tolerance);
+if useParallel && numel(chunkStarts) > 1
+    parfor chunkIndex = 1:numel(chunkStarts)
+        firstRow = chunkStarts(chunkIndex);
+        lastRow = min(firstRow + chunkSize - 1, numel(candidateTargetRows));
+        chunkTargetRows = candidateTargetRows(firstRow:lastRow);
+        [locatedChunks{chunkIndex}, labelChunks{chunkIndex}] = locateTargetChunk( ...
+            inputMesh, targetMesh, chunkTargetRows, sourceBoxMin, sourceBoxMax, ...
+            tolerance, usePointLocation, sourceTriangulation);
     end
+else
+    for chunkIndex = 1:numel(chunkStarts)
+        firstRow = chunkStarts(chunkIndex);
+        lastRow = min(firstRow + chunkSize - 1, numel(candidateTargetRows));
+        chunkTargetRows = candidateTargetRows(firstRow:lastRow);
+        [locatedChunks{chunkIndex}, labelChunks{chunkIndex}] = locateTargetChunk( ...
+            inputMesh, targetMesh, chunkTargetRows, sourceBoxMin, sourceBoxMax, ...
+            tolerance, usePointLocation, sourceTriangulation);
+    end
+end
 
-    localRowsInsideBox = find(insideSourceBox);
-    found = ~isnan(located);
-    if any(found)
-        localRowsFound = localRowsInsideBox(found);
-        candidateRowsFound = firstRow + localRowsFound - 1;
-        locatedInputElements(candidateRowsFound) = located(found);
-        candidateInputLabels(candidateRowsFound) = inputMesh.elementLabels(located(found));
+locatedInputElements = vertcat(locatedChunks{:});
+candidateInputLabels = vertcat(labelChunks{:});
+end
+
+function [locatedInputElements, candidateInputLabels] = locateTargetChunk( ...
+    inputMesh, targetMesh, chunkTargetRows, sourceBoxMin, sourceBoxMax, ...
+    tolerance, usePointLocation, sourceTriangulation)
+locatedInputElements = nan(numel(chunkTargetRows), 1);
+candidateInputLabels = nan(numel(chunkTargetRows), 1);
+centroids = tetraCentroids(targetMesh.nodes, targetMesh.elements(chunkTargetRows, :));
+insideSourceBox = all(centroids >= sourceBoxMin & centroids <= sourceBoxMax, 2);
+if ~any(insideSourceBox)
+    return;
+end
+
+pointsToLocate = centroids(insideSourceBox, :);
+if usePointLocation
+    located = pointLocation(sourceTriangulation, pointsToLocate);
+    located = located(:);
+    unresolved = isnan(located);
+    if tolerance > 0 && any(unresolved)
+        located(unresolved) = locatePointsInTets( ...
+            inputMesh.nodes, inputMesh.elements, pointsToLocate(unresolved, :), tolerance);
     end
+else
+    located = locatePointsInTets( ...
+        inputMesh.nodes, inputMesh.elements, pointsToLocate, tolerance);
+end
+
+localRowsInsideBox = find(insideSourceBox);
+found = ~isnan(located);
+if any(found)
+    localRowsFound = localRowsInsideBox(found);
+    locatedInputElements(localRowsFound) = located(found);
+    candidateInputLabels(localRowsFound) = inputMesh.elementLabels(located(found));
 end
 end
 
@@ -801,7 +887,7 @@ end
 end
 
 function [mappedLabels, holeRepairInfo] = repairUnmappedTargetHolesByNodeVotes( ...
-    targetMesh, mappedLabels, inputLabels, newLabels, holeRepairInfo)
+    targetMesh, mappedLabels, inputLabels, newLabels, holeRepairInfo, useParallel)
 candidateRows = find(ismember(targetMesh.elementLabels, holeRepairInfo.targetLabels));
 unmappedRows = candidateRows(mappedLabels(candidateRows) == ...
     targetMesh.elementLabels(candidateRows));
@@ -836,7 +922,7 @@ for pass = 1:holeRepairInfo.maxPasses
 
     [passRows, passLabelIndices] = chooseHoleRepairRows( ...
         targetMesh.elements, remainingRows, nodeVotes, ...
-        newLabelCount, holeRepairInfo.minNodeVotes, chunkSize);
+        newLabelCount, holeRepairInfo.minNodeVotes, chunkSize, useParallel);
     if isempty(passRows)
         break;
     end
@@ -851,40 +937,55 @@ end
 end
 
 function [repairRows, repairLabelIndices] = chooseHoleRepairRows( ...
-    elements, candidateRows, nodeVotes, labelCount, minNodeVotes, chunkSize)
+    elements, candidateRows, nodeVotes, labelCount, minNodeVotes, chunkSize, useParallel)
 chunkCount = ceil(numel(candidateRows) / chunkSize);
 repairRowChunks = cell(chunkCount, 1);
 repairLabelChunks = cell(chunkCount, 1);
 
-chunkIndex = 0;
-for firstRow = 1:chunkSize:numel(candidateRows)
-    chunkIndex = chunkIndex + 1;
-    lastRow = min(firstRow + chunkSize - 1, numel(candidateRows));
-    rows = candidateRows(firstRow:lastRow);
-    rowNodes = elements(rows, :);
-    voteCounts = zeros(numel(rows), labelCount);
-
-    for labelIndex = 1:labelCount
-        nodeLabelVotes = full(nodeVotes(rowNodes(:), labelIndex));
-        nodeLabelVotes = reshape(nodeLabelVotes, size(rowNodes));
-        voteCounts(:, labelIndex) = sum(nodeLabelVotes, 2);
+if useParallel && chunkCount > 1
+    parfor chunkIndex = 1:chunkCount
+        firstRow = (chunkIndex - 1) * chunkSize + 1;
+        lastRow = min(firstRow + chunkSize - 1, numel(candidateRows));
+        rows = candidateRows(firstRow:lastRow);
+        [repairRowChunks{chunkIndex}, repairLabelChunks{chunkIndex}] = ...
+            chooseHoleRepairChunk(elements, rows, nodeVotes, labelCount, minNodeVotes);
     end
-
-    [maxVotes, labelIndices] = max(voteCounts, [], 2);
-    isUniqueWinner = sum(voteCounts == maxVotes, 2) == 1;
-    fillRows = maxVotes >= minNodeVotes & isUniqueWinner;
-
-    repairRowChunks{chunkIndex} = rows(fillRows);
-    repairLabelChunks{chunkIndex} = labelIndices(fillRows);
+else
+    for chunkIndex = 1:chunkCount
+        firstRow = (chunkIndex - 1) * chunkSize + 1;
+        lastRow = min(firstRow + chunkSize - 1, numel(candidateRows));
+        rows = candidateRows(firstRow:lastRow);
+        [repairRowChunks{chunkIndex}, repairLabelChunks{chunkIndex}] = ...
+            chooseHoleRepairChunk(elements, rows, nodeVotes, labelCount, minNodeVotes);
+    end
 end
 
-if chunkIndex == 0
+if chunkCount == 0
     repairRows = zeros(0, 1);
     repairLabelIndices = zeros(0, 1);
 else
-    repairRows = vertcat(repairRowChunks{1:chunkIndex});
-    repairLabelIndices = vertcat(repairLabelChunks{1:chunkIndex});
+    repairRows = vertcat(repairRowChunks{:});
+    repairLabelIndices = vertcat(repairLabelChunks{:});
 end
+end
+
+function [repairRows, repairLabelIndices] = chooseHoleRepairChunk( ...
+    elements, rows, nodeVotes, labelCount, minNodeVotes)
+rowNodes = elements(rows, :);
+voteCounts = zeros(numel(rows), labelCount);
+
+for labelIndex = 1:labelCount
+    nodeLabelVotes = full(nodeVotes(rowNodes(:), labelIndex));
+    nodeLabelVotes = reshape(nodeLabelVotes, size(rowNodes));
+    voteCounts(:, labelIndex) = sum(nodeLabelVotes, 2);
+end
+
+[maxVotes, labelIndices] = max(voteCounts, [], 2);
+isUniqueWinner = sum(voteCounts == maxVotes, 2) == 1;
+fillRows = maxVotes >= minNodeVotes & isUniqueWinner;
+
+repairRows = rows(fillRows);
+repairLabelIndices = labelIndices(fillRows);
 end
 
 function [fillInputLabels, fillInfo] = fillTargetRowsBySourceLabels( ...
@@ -957,6 +1058,24 @@ function elementIndex = locatePointsInTets(nodes, elements, points, tolerance)
 elementIndex = nan(size(points, 1), 1);
 if isempty(points)
     return;
+end
+
+persistent useMexLocator
+if isempty(useMexLocator)
+    useMexLocator = exist('locatePointsInTetsMex', 'file') == 3;
+end
+
+if useMexLocator
+    try
+        elementIndex = locatePointsInTetsMex(nodes, elements, points, tolerance);
+        elementIndex = elementIndex(:);
+        return;
+    catch exception
+        useMexLocator = false;
+        warning('mapDatMeshLabels:MexPointLocatorFailed', ...
+            'locatePointsInTetsMex failed; using MATLAB fallback: %s', ...
+            exception.message);
+    end
 end
 
 boxMin = min(nodes, [], 1) - tolerance;
@@ -1107,7 +1226,7 @@ end
 function writeLabelLog(logFile, inputDatFile, targetDatFile, outputDatFile, ...
     targetLabelsToMap, inputLabels, inputLabelNames, newLabels, newLabelNames, ...
     mappedRowsByInputLabel, outputLabelTable, surfaceFilterInfo, ...
-    repairInfo, holeRepairInfo, fillInfo)
+    repairInfo, holeRepairInfo, fillInfo, optimizationInfo)
 fid = fopen(logFile, 'w');
 if fid < 0
     error('mapDatMeshLabels:LogWriteFailed', 'Could not write log file: %s', logFile);
@@ -1136,6 +1255,13 @@ for labelIndex = 1:numel(inputLabels)
         newLabels(labelIndex), char(newLabelNames(labelIndex)), ...
         mappedRowsByInputLabel(labelIndex));
 end
+
+fprintf(fid, '\nOptimization\n');
+fprintf(fid, '  Parallel requested: %d\n', optimizationInfo.useParallelRequested);
+fprintf(fid, '  Parallel enabled: %d\n', optimizationInfo.useParallel);
+fprintf(fid, '  MEX point locator available: %d\n', ...
+    optimizationInfo.mexPointLocatorAvailable);
+fprintf(fid, '  MEX extension: %s\n', optimizationInfo.mexExtension);
 
 if isfield(surfaceFilterInfo, 'enabled') && surfaceFilterInfo.enabled
     fprintf(fid, '\nTarget surface-distance filter\n');

@@ -264,7 +264,7 @@ view(ax, viewAngle(1), viewAngle(2));
 xlabel(ax, 'X');
 ylabel(ax, 'Y');
 zlabel(ax, 'Z');
-title(ax, plotTitle);
+title(ax, plotTitle, 'Interpreter', 'none');
 legend(ax, 'Location', 'northeastoutside');
 camlight(ax, 'headlight');
 lighting(ax, 'gouraud');

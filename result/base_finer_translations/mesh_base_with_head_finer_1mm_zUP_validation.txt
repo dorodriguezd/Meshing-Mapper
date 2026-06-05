@@ -1,0 +1,38 @@
+Translated head remap DAT validation
+Reference DAT: D:\David\OneDrive - Politecnico di Torino\Documents\Meshing Mapper\input\mesh_base.dat
+Remapped DAT:  D:\David\OneDrive - Politecnico di Torino\Documents\Meshing Mapper\result\base_finer_translations\mesh_base_with_head_finer_1mm_zUP.dat
+
+Block counts
+  Coordinates: reference 1725836, remapped 1725836
+  Elements:    reference 10220880, remapped 10220880
+  Materials:   reference 24, remapped 29
+
+Remapped element label counts
+  Label 1: 110486
+  Label 2: 70832
+  Label 3: 22154
+  Label 4: 22141
+  Label 5: 22154
+  Label 6: 22094
+  Label 7: 22131
+  Label 8: 22225
+  Label 9: 22232
+  Label 10: 22020
+  Label 11: 22356
+  Label 12: 22207
+  Label 13: 22172
+  Label 14: 22005
+  Label 15: 22045
+  Label 16: 22160
+  Label 17: 22653
+  Label 18: 22082
+  Label 19: 2004413
+  Label 22: 94560
+  Label 23: 58244
+  Label 25: 788196
+  Label 26: 978299
+  Label 27: 3053647
+  Label 28: 1373120
+  Label 29: 1334252
+
+Validation passed.

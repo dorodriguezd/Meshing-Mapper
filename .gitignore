@@ -11,3 +11,4 @@ result/*.fig
 result/*/*.dat
 result/*/*.png
 result/*/*.fig
+mex/*.mex*
