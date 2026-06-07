@@ -2,8 +2,7 @@ function results = benchmarkMapperOptimization
 %BENCHMARKMAPPEROPTIMIZATION Compare mapper execution modes on this machine.
 
 repoRoot = fileparts(fileparts(mfilename('fullpath')));
-addpath(repoRoot);
-addpath(fullfile(repoRoot, 'examples'));
+addpath(fullfile(repoRoot, 'Lib'));
 files = resolveExampleMeshes( ...
     fullfile(repoRoot, 'examples', 'mapper', 'data'), "load");
 

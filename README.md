@@ -42,11 +42,9 @@ written to:
 examples/mapper/output/
 ```
 
-To run the same examples from the convenience script:
-
-```matlab
-run("examples/mapper/run_mapper_example.m");
-```
+`main.m` is the only MATLAB file exposed at the repository root. All
+functions, including the mapper API, example-data helpers, validation,
+visualization, benchmarks, and tests, are under `Lib/`.
 
 ## Public Mapping API
 
@@ -122,14 +120,14 @@ run("main.m");
 Generate the files without running the mapping examples:
 
 ```matlab
-addpath("examples");
+addpath("Lib");
 files = generateExampleMeshes();
 ```
 
 Resolve either mode programmatically:
 
 ```matlab
-addpath("examples");
+addpath("Lib");
 files = resolveExampleMeshes("examples/mapper/data", "load");
 files = resolveExampleMeshes("examples/mapper/data", "generate");
 ```
@@ -622,50 +620,12 @@ run("main.m");
 
 PNG files are still exported to `examples/mapper/output`.
 
-## Project-Specific Head Workflows
-
-The large head inputs are intentionally not committed. Required files and
-validated settings are documented in `AGENTS.md`.
-
-Check inputs and tracked validation reports without remapping:
-
-```matlab
-addpath("workflows/head");
-main_head_mapping();
-main_head_translation();
-```
-
-Validate ignored remapped DAT files when they are available locally:
-
-```matlab
-main_head_mapping("validate");
-main_head_translation("validate");
-```
-
-Run the expensive production baseline mapping:
-
-```matlab
-main_head_mapping("map");
-```
-
-Run the explicit 2 mm downward translation case:
-
-```matlab
-main_head_translation("map-2mm-down");
-```
-
-Visualize that case after mapping:
-
-```matlab
-main_head_translation("visualize-2mm-down");
-```
-
 ## Tests
 
 Run the release suite:
 
 ```matlab
-addpath("tests");
+addpath("Lib");
 run_release_tests;
 ```
 
@@ -680,27 +640,27 @@ The suite checks:
 - Automatic non-conflicting labels
 - Baseline-label collision rejection
 - Duplicate output-label rejection
-- Production DAT translation helper used by head sensitivity workflows
+- DAT coordinate translation helper
 
 Benchmark serial, MEX, and thread-worker configurations:
 
 ```matlab
-addpath("tests");
+addpath("Lib");
 results = benchmarkMapperOptimization;
 ```
 
 ## Repository Structure
 
 ```text
-main.m                         Sectioned release examples
-remap.m                        Baseline-first public mapping API
-meshingMapper.m                Format-dispatch and configuration API
-Lib/                           Core mapping, validation, and visualization
+main.m                         Only user-facing setup and example script
+Lib/                           All MATLAB functions
+Lib/remap.m                    Baseline-first mapping API
+Lib/meshingMapper.m            Format dispatch and configuration
+Lib/generateExampleMeshes.m    Example fixture generator
+Lib/resolveExampleMeshes.m     Load/generate example-data resolver
+Lib/run_release_tests.m        Release test entry point
+Lib/benchmarkMapperOptimization.m
 mex/                           Optional C++ point-location fallback
-examples/generateExampleMeshes.m
-examples/resolveExampleMeshes.m
 examples/mapper/data/            Committed DAT and MSH fixtures
 examples/mapper/output/          Ignored generated outputs and figures
-tests/                           Release tests
-workflows/head/                  Project-specific head workflows
 ```

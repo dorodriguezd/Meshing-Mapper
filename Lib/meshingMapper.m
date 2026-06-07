@@ -11,7 +11,7 @@ if nargin ~= 1 || ~isstruct(config) || ~isscalar(config)
         'Configuration must be one scalar struct.');
 end
 
-repoRoot = fileparts(mfilename('fullpath'));
+repoRoot = fileparts(fileparts(mfilename('fullpath')));
 addpath(fullfile(repoRoot, 'Lib'));
 mexFolder = fullfile(repoRoot, 'mex');
 addpath(mexFolder);

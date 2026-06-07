@@ -4,8 +4,8 @@ function files = generateExampleMeshes(outputFolder)
 % Dimensions are expressed in centimeters.
 
 if nargin < 1 || isempty(outputFolder)
-    exampleRoot = fileparts(mfilename('fullpath'));
-    outputFolder = fullfile(exampleRoot, 'mapper', 'data');
+    repoRoot = fileparts(fileparts(mfilename('fullpath')));
+    outputFolder = fullfile(repoRoot, 'examples', 'mapper', 'data');
 end
 if exist(outputFolder, 'dir') ~= 7
     mkdir(outputFolder);

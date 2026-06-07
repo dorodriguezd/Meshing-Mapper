@@ -7,9 +7,7 @@ close all;
 clc;
 
 repoRoot = fileparts(mfilename('fullpath'));
-addpath(repoRoot);
 addpath(fullfile(repoRoot, 'Lib'));
-addpath(fullfile(repoRoot, 'examples'));
 
 exampleData = fullfile(repoRoot, 'examples', 'mapper', 'data');
 exampleOutput = fullfile(repoRoot, 'examples', 'mapper', 'output');

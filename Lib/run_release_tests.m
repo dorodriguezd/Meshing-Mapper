@@ -3,9 +3,7 @@ function run_release_tests
 
 testRoot = fileparts(mfilename('fullpath'));
 repoRoot = fileparts(testRoot);
-addpath(repoRoot);
 addpath(fullfile(repoRoot, 'Lib'));
-addpath(fullfile(repoRoot, 'examples'));
 
 fprintf('Running sectioned DAT and MSH examples...\n');
 figureVisibility = 'off'; %#ok<NASGU>

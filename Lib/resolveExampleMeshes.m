@@ -5,8 +5,8 @@ function files = resolveExampleMeshes(dataFolder, mode)
 %   files = RESOLVEEXAMPLEMESHES(dataFolder, "generate")
 
 if nargin < 1 || isempty(dataFolder)
-    exampleRoot = fileparts(mfilename('fullpath'));
-    dataFolder = fullfile(exampleRoot, 'mapper', 'data');
+    repoRoot = fileparts(fileparts(mfilename('fullpath')));
+    dataFolder = fullfile(repoRoot, 'examples', 'mapper', 'data');
 end
 if nargin < 2 || strlength(string(mode)) == 0
     mode = "load";
