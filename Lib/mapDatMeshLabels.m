@@ -71,6 +71,16 @@ function [mappedTargetLabels, info] = mapDatMeshLabels(inputDatFile, targetDatFi
 %       'UseParallel'    Process independent mapping chunks with parfor when
 %                        Parallel Computing Toolbox is available. Default:
 %                        false.
+%       'ParallelPoolType'
+%                        Pool preference: "auto", "threads", or
+%                        "processes". Default: "auto".
+%       'ParallelWorkers'
+%                        Requested worker count when creating a pool.
+%                        Default: [] uses the profile default.
+%       'UseMex'         Use locatePointsInTetsMex for fallback point
+%                        location when available. Default: false.
+%       'MexRequired'    Error if UseMex is true but MEX execution fails or
+%                        the binary is unavailable. Default: false.
 
 parser = inputParser;
 parser.FunctionName = mfilename;
@@ -96,6 +106,11 @@ addParameter(parser, 'HoleRepairMinNodeVotes', 4, @(x) isnumeric(x) && isscalar(
 addParameter(parser, 'TargetSurfaceDistanceFilterLabels', [], @(x) isnumeric(x) || islogical(x));
 addParameter(parser, 'TargetSurfaceDistance', inf, @(x) isnumeric(x) && isscalar(x) && x >= 0);
 addParameter(parser, 'UseParallel', false, @(x) islogical(x) && isscalar(x));
+addParameter(parser, 'ParallelPoolType', 'auto', @isTextScalar);
+addParameter(parser, 'ParallelWorkers', [], ...
+    @(x) isempty(x) || (isnumeric(x) && isscalar(x) && x >= 1 && x == fix(x)));
+addParameter(parser, 'UseMex', false, @(x) islogical(x) && isscalar(x));
+addParameter(parser, 'MexRequired', false, @(x) islogical(x) && isscalar(x));
 parse(parser, inputDatFile, targetDatFile, varargin{:});
 
 inputDatFile = char(parser.Results.inputDatFile);
@@ -106,9 +121,25 @@ targetMesh = readProblemDatMesh(targetDatFile);
 
 optimizationInfo = struct();
 optimizationInfo.useParallelRequested = parser.Results.UseParallel;
-optimizationInfo.useParallel = resolveParallelExecution(parser.Results.UseParallel);
+optimizationInfo.parallelPoolTypeRequested = char(parser.Results.ParallelPoolType);
+optimizationInfo.parallelWorkersRequested = parser.Results.ParallelWorkers;
+[optimizationInfo.useParallel, optimizationInfo.parallelPoolType] = ...
+    resolveParallelExecution(parser.Results.UseParallel, ...
+    parser.Results.ParallelPoolType, parser.Results.ParallelWorkers);
 optimizationInfo.mexPointLocatorAvailable = exist('locatePointsInTetsMex', 'file') == 3;
+optimizationInfo.useMexRequested = parser.Results.UseMex;
+optimizationInfo.useMex = parser.Results.UseMex && ...
+    optimizationInfo.mexPointLocatorAvailable;
+optimizationInfo.mexRequired = parser.Results.MexRequired;
 optimizationInfo.mexExtension = mexext;
+if parser.Results.UseMex && ~optimizationInfo.mexPointLocatorAvailable
+    if parser.Results.MexRequired
+        error('mapDatMeshLabels:MexRequiredUnavailable', ...
+            'UseMex is true, but locatePointsInTetsMex.%s is unavailable.', mexext);
+    end
+    warning('mapDatMeshLabels:MexUnavailable', ...
+        'UseMex is true, but the MEX helper is unavailable; using MATLAB fallback.');
+end
 
 inputLabels = numericColumn(parser.Results.InputLabels);
 if isempty(inputLabels)
@@ -194,6 +225,10 @@ if any(ismember(newLabels, targetMesh.elementLabels)) || any(ismember(newLabels,
     error('mapDatMeshLabels:NewLabelConflict', ...
         'NewLabels must not already exist in the target mesh/material table.');
 end
+if numel(unique(newLabels)) ~= numel(newLabels)
+    error('mapDatMeshLabels:DuplicateNewLabels', ...
+        'NewLabels must contain one distinct output label per selected input label.');
+end
 
 existingOutputLabels = sort(unique([targetMesh.elementLabels; targetMesh.materialLabels]));
 targetLabelNames = normalizeLabelNames( ...
@@ -246,7 +281,8 @@ if surfaceFilterInfo.enabled
 end
 [locatedInputElements, candidateInputLabels] = locateTargetRowsInInputMesh( ...
     inputMesh, targetMesh, candidateTargetRows, parser.Results.Tolerance, ...
-    parser.Results.ChunkSize, optimizationInfo.useParallel);
+    parser.Results.ChunkSize, optimizationInfo.useParallel, ...
+    optimizationInfo.useMex, optimizationInfo.mexRequired);
 
 mappedRowsByInputLabel = zeros(numel(inputLabels), 1);
 for labelIndex = 1:numel(inputLabels)
@@ -405,10 +441,18 @@ function tf = isTextVector(value)
 tf = isempty(value) || ischar(value) || isstring(value) || iscellstr(value);
 end
 
-function useParallel = resolveParallelExecution(requested)
+function [useParallel, poolType] = resolveParallelExecution( ...
+    requested, requestedPoolType, requestedWorkers)
 useParallel = false;
+poolType = 'none';
 if ~requested
     return;
+end
+
+requestedPoolType = lower(char(requestedPoolType));
+if ~ismember(requestedPoolType, {'auto', 'threads', 'processes'})
+    error('mapDatMeshLabels:InvalidParallelPoolType', ...
+        'ParallelPoolType must be "auto", "threads", or "processes".');
 end
 
 if exist('parpool', 'file') ~= 2 || license('test', 'Distrib_Computing_Toolbox') ~= 1
@@ -420,17 +464,38 @@ end
 try
     pool = gcp('nocreate');
     if isempty(pool)
-        try
-            pool = parpool('threads');
-        catch
-            pool = parpool;
+        switch requestedPoolType
+            case 'threads'
+                pool = createPool('threads', requestedWorkers);
+            case 'processes'
+                pool = createPool('Processes', requestedWorkers);
+            otherwise
+                try
+                    pool = createPool('threads', requestedWorkers);
+                catch
+                    pool = createPool('Processes', requestedWorkers);
+                end
         end
+    elseif ~isempty(requestedWorkers) && pool.NumWorkers ~= requestedWorkers
+        warning('mapDatMeshLabels:ExistingPoolSizeMismatch', ...
+            ['ParallelWorkers=%d was requested, but an existing pool has %d ' ...
+            'workers. The existing pool is being used.'], ...
+            requestedWorkers, pool.NumWorkers);
     end
     useParallel = pool.NumWorkers > 1;
+    poolType = class(pool);
 catch exception
     warning('mapDatMeshLabels:ParallelStartupFailed', ...
         'UseParallel was requested, but a parallel pool could not be started: %s', ...
         exception.message);
+end
+
+function pool = createPool(poolType, requestedWorkers)
+if isempty(requestedWorkers)
+    pool = parpool(poolType);
+else
+    pool = parpool(poolType, requestedWorkers);
+end
 end
 end
 
@@ -742,7 +807,8 @@ end
 end
 
 function [locatedInputElements, candidateInputLabels] = locateTargetRowsInInputMesh( ...
-    inputMesh, targetMesh, candidateTargetRows, tolerance, chunkSize, useParallel)
+    inputMesh, targetMesh, candidateTargetRows, tolerance, chunkSize, useParallel, ...
+    useMex, mexRequired)
 locatedInputElements = nan(numel(candidateTargetRows), 1);
 candidateInputLabels = nan(numel(candidateTargetRows), 1);
 if isempty(candidateTargetRows)
@@ -772,7 +838,7 @@ if useParallel && numel(chunkStarts) > 1
         chunkTargetRows = candidateTargetRows(firstRow:lastRow);
         [locatedChunks{chunkIndex}, labelChunks{chunkIndex}] = locateTargetChunk( ...
             inputMesh, targetMesh, chunkTargetRows, sourceBoxMin, sourceBoxMax, ...
-            tolerance, usePointLocation, sourceTriangulation);
+            tolerance, usePointLocation, sourceTriangulation, useMex, mexRequired);
     end
 else
     for chunkIndex = 1:numel(chunkStarts)
@@ -781,7 +847,7 @@ else
         chunkTargetRows = candidateTargetRows(firstRow:lastRow);
         [locatedChunks{chunkIndex}, labelChunks{chunkIndex}] = locateTargetChunk( ...
             inputMesh, targetMesh, chunkTargetRows, sourceBoxMin, sourceBoxMax, ...
-            tolerance, usePointLocation, sourceTriangulation);
+            tolerance, usePointLocation, sourceTriangulation, useMex, mexRequired);
     end
 end
 
@@ -791,7 +857,7 @@ end
 
 function [locatedInputElements, candidateInputLabels] = locateTargetChunk( ...
     inputMesh, targetMesh, chunkTargetRows, sourceBoxMin, sourceBoxMax, ...
-    tolerance, usePointLocation, sourceTriangulation)
+    tolerance, usePointLocation, sourceTriangulation, useMex, mexRequired)
 locatedInputElements = nan(numel(chunkTargetRows), 1);
 candidateInputLabels = nan(numel(chunkTargetRows), 1);
 centroids = tetraCentroids(targetMesh.nodes, targetMesh.elements(chunkTargetRows, :));
@@ -807,11 +873,13 @@ if usePointLocation
     unresolved = isnan(located);
     if tolerance > 0 && any(unresolved)
         located(unresolved) = locatePointsInTets( ...
-            inputMesh.nodes, inputMesh.elements, pointsToLocate(unresolved, :), tolerance);
+            inputMesh.nodes, inputMesh.elements, pointsToLocate(unresolved, :), ...
+            tolerance, useMex, mexRequired);
     end
 else
     located = locatePointsInTets( ...
-        inputMesh.nodes, inputMesh.elements, pointsToLocate, tolerance);
+        inputMesh.nodes, inputMesh.elements, pointsToLocate, tolerance, ...
+        useMex, mexRequired);
 end
 
 localRowsInsideBox = find(insideSourceBox);
@@ -1054,24 +1122,23 @@ for firstRow = 1:chunkSize:size(queryCentroids, 1)
 end
 end
 
-function elementIndex = locatePointsInTets(nodes, elements, points, tolerance)
+function elementIndex = locatePointsInTets( ...
+    nodes, elements, points, tolerance, useMex, mexRequired)
 elementIndex = nan(size(points, 1), 1);
 if isempty(points)
     return;
 end
 
-persistent useMexLocator
-if isempty(useMexLocator)
-    useMexLocator = exist('locatePointsInTetsMex', 'file') == 3;
-end
-
-if useMexLocator
+if useMex
     try
         elementIndex = locatePointsInTetsMex(nodes, elements, points, tolerance);
         elementIndex = elementIndex(:);
         return;
     catch exception
-        useMexLocator = false;
+        if mexRequired
+            error('mapDatMeshLabels:MexExecutionFailed', ...
+                'Required MEX point locator failed: %s', exception.message);
+        end
         warning('mapDatMeshLabels:MexPointLocatorFailed', ...
             'locatePointsInTetsMex failed; using MATLAB fallback: %s', ...
             exception.message);
@@ -1259,6 +1326,19 @@ end
 fprintf(fid, '\nOptimization\n');
 fprintf(fid, '  Parallel requested: %d\n', optimizationInfo.useParallelRequested);
 fprintf(fid, '  Parallel enabled: %d\n', optimizationInfo.useParallel);
+fprintf(fid, '  Parallel pool requested: %s\n', ...
+    optimizationInfo.parallelPoolTypeRequested);
+fprintf(fid, '  Parallel pool active: %s\n', ...
+    optimizationInfo.parallelPoolType);
+if isempty(optimizationInfo.parallelWorkersRequested)
+    fprintf(fid, '  Parallel workers requested: profile default\n');
+else
+    fprintf(fid, '  Parallel workers requested: %d\n', ...
+        optimizationInfo.parallelWorkersRequested);
+end
+fprintf(fid, '  MEX requested: %d\n', optimizationInfo.useMexRequested);
+fprintf(fid, '  MEX enabled: %d\n', optimizationInfo.useMex);
+fprintf(fid, '  MEX required: %d\n', optimizationInfo.mexRequired);
 fprintf(fid, '  MEX point locator available: %d\n', ...
     optimizationInfo.mexPointLocatorAvailable);
 fprintf(fid, '  MEX extension: %s\n', optimizationInfo.mexExtension);

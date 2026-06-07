@@ -65,15 +65,11 @@ input/head_finer.dat
 input/mesh_base.dat
 ```
 
-Optional inputs for older or specialized workflows:
+Accepted current aliases:
 
 ```text
-input/mesh_bowls_bigger.dat
-HeadMapping/mesh_head.dat
-HeadMapping/mesh_bowls.dat
-HeadMapping/Legends_head.png
-geometry/sfera.stp
-geometry/sfera.gid/
+input/mesh__head.dat
+input/mesh__baseline.dat
 ```
 
 Generated inputs that can be copied or regenerated:
@@ -138,10 +134,9 @@ target domain.
 ### Baseline Base/Finer Mapping
 
 ```powershell
-matlab -batch "build_head_mapping_base_finer"
-matlab -batch "validate_head_mapping_base_finer"
-matlab -batch "visualize_head_mapping_base_finer"
-matlab -batch "visualize_base_finer_skin_antennas"
+matlab -batch "addpath('workflows/head'); main_head_mapping('map')"
+matlab -batch "addpath('workflows/head'); main_head_mapping('check')"
+matlab -batch "addpath('workflows/head'); main_head_mapping('visualize')"
 ```
 
 Primary output:
@@ -161,11 +156,12 @@ Labels 3 through 18 are plotted as one transparent antenna group.
 
 ### Translation Sensitivity
 
-`build_head_finer_translation_sensitivity.m` creates and maps:
+`workflows/head/build_head_finer_translation_sensitivity.m` creates and maps:
 
 ```text
 head_finer_1mm_zUP.dat    translation [0 0  0.001] m
 head_finer_1mm_zDOWN.dat  translation [0 0 -0.001] m
+head_finer_2mm_zDOWN.dat  translation [0 0 -0.002] m
 ```
 
 Both translated sources are mapped onto `input/mesh_base.dat`, not onto
@@ -174,15 +170,31 @@ Both translated sources are mapped onto `input/mesh_base.dat`, not onto
 Full run:
 
 ```powershell
-matlab -batch "build_head_finer_translation_sensitivity"
+matlab -batch "addpath('workflows/head'); build_head_finer_translation_sensitivity"
 ```
 
 Run or resume one case:
 
 ```powershell
-matlab -batch "setenv('HEAD_TRANSLATION_CASES','1mm_zUP'); setenv('HEAD_TRANSLATION_COMPILE_MEX','false'); build_head_finer_translation_sensitivity"
+matlab -batch "addpath('workflows/head'); setenv('HEAD_TRANSLATION_CASES','1mm_zUP'); setenv('HEAD_TRANSLATION_COMPILE_MEX','false'); build_head_finer_translation_sensitivity"
 
-matlab -batch "setenv('HEAD_TRANSLATION_CASES','1mm_zDOWN'); setenv('HEAD_TRANSLATION_COMPILE_MEX','false'); build_head_finer_translation_sensitivity"
+matlab -batch "addpath('workflows/head'); setenv('HEAD_TRANSLATION_CASES','1mm_zDOWN'); setenv('HEAD_TRANSLATION_COMPILE_MEX','false'); build_head_finer_translation_sensitivity"
+```
+
+Add `workflows/head` to the MATLAB path before calling the moved script.
+The release-facing entry point checks required inputs and tracked reports by
+default. Use the `validate` action only when ignored remapped DAT files have
+been copied locally:
+
+```powershell
+matlab -batch "addpath('workflows/head'); main_head_translation('check')"
+matlab -batch "addpath('workflows/head'); main_head_translation('validate')"
+```
+
+The 2 mm downward remap is explicit because it is expensive:
+
+```powershell
+matlab -batch "addpath('workflows/head'); main_head_translation('map-2mm-down')"
 ```
 
 Supported environment controls:
@@ -236,12 +248,29 @@ Important functions:
 | File | Purpose |
 |---|---|
 | `Lib/mapDatMeshLabels.m` | Read DAT meshes, map labels, write DAT/log |
-| `Lib/transformMeshGeometry.m` | Homogeneous rotation/translation |
+| `Lib/translateDatMeshCoordinates.m` | Narrow DAT translation helper for sensitivity workflows |
 | `Lib/visualizeDatLabelGroups.m` | Plot grouped DAT labels |
 | `Lib/plotDatMaterialLabels.m` | Plot requested individual labels |
 | `Lib/plotDatLabels.m` | Resolve labels by index/name and plot |
 | `Lib/buildMeshingMapperMex.m` | Compile optional C++ MEX helpers |
+| `Lib/validateDatMeshFile.m` | Validate required DAT numeric blocks |
+| `Lib/visualizeMshLabelGroups.m` | Plot grouped labels from GiD MSH files |
 | `mex/locatePointsInTetsMex.cpp` | Fallback point-in-tetrahedron MEX |
+| `meshingMapper.m` | Release-facing mapping configuration API |
+| `remap.m` | Baseline-first public mapping entry point |
+
+Release layout updated on 2026-06-07:
+
+- `README.md` documents user workflows and options.
+- `main.m` is a sectioned setup script containing DAT and GiD MSH examples.
+- `examples/generateExampleMeshes.m` creates the committed centimeter-scale
+  cube, layered-cube, sphere, and multi-shape fixtures.
+- `examples/resolveExampleMeshes.m` supports explicit `"load"` and
+  `"generate"` example-data modes.
+- `examples/mapper` contains committed inputs and ignored generated outputs.
+- `workflows/head` contains current project-specific entry points.
+- Full DAT/MSH geometry transformation is maintained in
+  `https://github.com/dorodriguezd/Mesh_Transformer`.
 
 `mapDatMeshLabels` preserves the target file's non-coordinate/non-element
 sections and rewrites material properties in the target DAT syntax. DAT syntax
@@ -263,6 +292,15 @@ The generated `mex/locatePointsInTetsMex.mexw64` is ignored by Git.
 Current limitations:
 
 - `UseParallel=true` parallelizes independent chunks.
+- Public mapper settings include `ParallelPoolType`, `UseMex`, `BuildMex`,
+  `MexRequired`, and `MexVerbose`.
+- `BuildMex=true` compiles into a temporary folder to avoid overwriting a
+  loaded Windows MEX binary.
+- `UseMex="auto"` is the public mapper default. `mapDatMeshLabels` itself
+  defaults to `UseMex=false` when called directly.
+- DAT optimization examples in `main.m` are enabled with
+  `runOptimizationExamples=true`; fresh compilation additionally requires
+  `runMexBuildExample=true`.
 - The current implementation tries a thread-based pool first.
 - MATLAB thread workers cannot invoke this MEX helper.
 - In a thread pool, each worker warns once and uses the MATLAB fallback.
@@ -278,6 +316,50 @@ count, chunk size, MATLAB release, and peak memory for every meaningful change.
 Good next targets are DAT parsing/writing, target centroid location, and
 source-centroid repair. A production C++ spatial index should replace the
 current brute-force fallback before expecting major MEX speedups.
+
+### 2026-06-07 Local Optimization Benchmark
+
+Machine:
+
+- 2 x Intel Xeon Gold 6338
+- 64 physical cores total
+- 1 TB RAM
+- MATLAB R2026a Update 2
+- Parallel Computing Toolbox, 64-worker local profile
+- MinGW64 C++ 14.2
+- Compatible `locatePointsInTetsMex.mexw64`
+
+Benchmark case:
+
+- `baseline_layered_cubes.dat`: 34,992 target tetrahedra
+- `source_multishape.dat`: 5,520 source tetrahedra
+- Three source labels mapped into target labels 10 and 20
+- Parallel chunk size: 500
+
+Measured wall times:
+
+| Mode | Pool startup | Mapping |
+|---|---:|---:|
+| Serial MATLAB | 0 s | 4.790 s |
+| Serial MEX enabled | 0 s | 3.292 s |
+| 16 thread workers | 2.486 s | 6.038 s |
+| 32 thread workers | 0.227 s | 4.234 s |
+| 64 thread workers | 0.147 s | 10.610 s |
+| 16 process workers + MEX | 18.299 s | 3.559 s |
+| 32 process workers + MEX | 12.918 s | 3.001 s |
+
+Recommended settings on this machine:
+
+- Short/small mappings: serial with `UseMex=true`.
+- Long production mappings: reuse a 32-worker process pool, set
+  `UseParallel=true`, `ParallelPoolType="processes"`,
+  `ParallelWorkers=32`, `UseMex=true`, and keep `ChunkSize` initially at
+  100,000-250,000.
+- Do not default to 64 workers; it was substantially slower in this benchmark.
+- Use `BuildMex=false` while the compatible binary is present. Rebuild only
+  after MATLAB/compiler/platform changes.
+
+Run `tests/benchmarkMapperOptimization.m` to repeat the local benchmark.
 
 ## Validation Rules
 

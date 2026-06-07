@@ -15,8 +15,14 @@ function [targetLabels, info] = map3DMeshLabels(sourceMshFile, targetMshFile, va
 %                          first extra source element column is used. If the
 %                          source has no extra column, all source elements
 %                          are assigned label 1.
+%       'InputLabels'      Source labels to transfer. Default: all.
+%       'NewLabels'        Output label for each InputLabels value. Default:
+%                          consecutive labels above the maximum baseline
+%                          label.
+%       'TargetLabels'     Existing target labels where replacement is
+%                          allowed. Default: all target elements.
 %       'BackgroundLabel'  Label for target elements outside the source
-%                          volume. Default: 0.
+%                          volume when the target has no labels. Default: 0.
 %       'WriteMappedMesh'  Output .msh path. When provided, the target mesh
 %                          is written with the mapped label appended to each
 %                          element row.
@@ -28,6 +34,9 @@ parser.FunctionName = mfilename;
 addRequired(parser, 'sourceMshFile', @isTextScalar);
 addRequired(parser, 'targetMshFile', @isTextScalar);
 addParameter(parser, 'SourceLabels', [], @(x) isnumeric(x) || islogical(x));
+addParameter(parser, 'InputLabels', [], @(x) isnumeric(x) || islogical(x));
+addParameter(parser, 'NewLabels', [], @(x) isnumeric(x) || islogical(x));
+addParameter(parser, 'TargetLabels', [], @(x) isnumeric(x) || islogical(x));
 addParameter(parser, 'BackgroundLabel', 0, @(x) isnumeric(x) && isscalar(x));
 addParameter(parser, 'WriteMappedMesh', '', @isTextScalar);
 addParameter(parser, 'Tolerance', 1e-10, @(x) isnumeric(x) && isscalar(x) && x >= 0);
@@ -46,13 +55,66 @@ assert(targetMesh.nnode == 4, 'map3DMeshLabels:TargetNotTetra', ...
     'Target mesh must use tetrahedral elements with 4 nodes.');
 
 sourceLabels = chooseSourceLabels(sourceMesh, parser.Results.SourceLabels);
-targetCentroids = tetraCentroids(targetMesh.nodes, targetMesh.elements);
+inputLabels = numericColumn(parser.Results.InputLabels);
+if isempty(inputLabels)
+    inputLabels = unique(sourceLabels, 'stable');
+end
+missingInputLabels = setdiff(inputLabels, unique(sourceLabels));
+if ~isempty(missingInputLabels)
+    error('map3DMeshLabels:MissingInputLabels', ...
+        'Requested source labels are not present: %s', mat2str(missingInputLabels.'));
+end
+
+targetOriginalLabels = chooseTargetLabels(targetMesh, parser.Results.BackgroundLabel);
+existingTargetLabels = unique(targetOriginalLabels);
+newLabels = numericColumn(parser.Results.NewLabels);
+if isempty(newLabels)
+    firstNewLabel = max([existingTargetLabels; 0]) + 1;
+    newLabels = (firstNewLabel:(firstNewLabel + numel(inputLabels) - 1)).';
+elseif numel(newLabels) ~= numel(inputLabels)
+    error('map3DMeshLabels:NewLabelCountMismatch', ...
+        'NewLabels must contain one value per InputLabels value.');
+end
+
+if any(ismember(newLabels, existingTargetLabels))
+    error('map3DMeshLabels:NewLabelConflict', ...
+        ['NewLabels must not already exist in the baseline mesh. ' ...
+        'Existing labels: %s'], mat2str(existingTargetLabels.'));
+end
+if numel(unique(newLabels)) ~= numel(newLabels)
+    error('map3DMeshLabels:DuplicateNewLabels', ...
+        'NewLabels must contain one distinct output label per selected input label.');
+end
+targetLabelsToMap = numericColumn(parser.Results.TargetLabels);
+if isempty(targetLabelsToMap)
+    candidateTargetRows = (1:size(targetMesh.elements, 1)).';
+else
+    missingTargetLabels = setdiff(targetLabelsToMap, unique(targetOriginalLabels));
+    if ~isempty(missingTargetLabels)
+        error('map3DMeshLabels:MissingTargetLabels', ...
+            'Requested target labels are not present: %s', mat2str(missingTargetLabels.'));
+    end
+    candidateTargetRows = find(ismember(targetOriginalLabels, targetLabelsToMap));
+end
+
+selectedSourceRows = find(ismember(sourceLabels, inputLabels));
+targetCentroids = tetraCentroids( ...
+    targetMesh.nodes, targetMesh.elements(candidateTargetRows, :));
 sourceElementIndex = locatePointsInTets( ...
-    sourceMesh.nodes, sourceMesh.elements, targetCentroids, parser.Results.Tolerance);
+    sourceMesh.nodes, sourceMesh.elements(selectedSourceRows, :), ...
+    targetCentroids, parser.Results.Tolerance);
 
 insideSource = ~isnan(sourceElementIndex);
-targetLabels = repmat(parser.Results.BackgroundLabel, size(targetMesh.elements, 1), 1);
-targetLabels(insideSource) = sourceLabels(sourceElementIndex(insideSource));
+targetLabels = targetOriginalLabels;
+locatedSourceRows = selectedSourceRows(sourceElementIndex(insideSource));
+locatedSourceLabels = sourceLabels(locatedSourceRows);
+candidateMappedLabels = zeros(nnz(insideSource), 1);
+for labelIndex = 1:numel(inputLabels)
+    candidateMappedLabels(locatedSourceLabels == inputLabels(labelIndex)) = ...
+        newLabels(labelIndex);
+end
+mappedTargetRows = candidateTargetRows(insideSource);
+targetLabels(mappedTargetRows) = candidateMappedLabels;
 
 info = struct();
 info.sourceMesh = sourceMesh;
@@ -61,11 +123,29 @@ info.targetCentroids = targetCentroids;
 info.sourceElementIndex = sourceElementIndex;
 info.insideSource = insideSource;
 info.backgroundLabel = parser.Results.BackgroundLabel;
-info.assignedFraction = nnz(insideSource) / numel(insideSource);
+info.inputLabels = inputLabels;
+info.newLabels = newLabels;
+info.targetLabelsToMap = targetLabelsToMap;
+info.candidateTargetRows = candidateTargetRows;
+info.mappedTargetRows = mappedTargetRows;
+info.assignedFraction = nnz(insideSource) / max(1, numel(insideSource));
 info.outputMshFile = outputMshFile;
 
 if ~isempty(outputMshFile)
     writeGidTetraMeshWithLabels(outputMshFile, targetMesh, targetLabels);
+end
+
+function labels = chooseTargetLabels(mesh, backgroundLabel)
+if isempty(mesh.elementData)
+    labels = repmat(backgroundLabel, size(mesh.elements, 1), 1);
+else
+    labels = mesh.elementData(:, 1);
+end
+end
+
+function values = numericColumn(values)
+values = double(values(:));
+values = values(~isnan(values));
 end
 end
 
@@ -343,14 +423,15 @@ fprintf(fid, 'Elements\n');
 for elem = 1:size(mesh.elements, 1)
     fprintf(fid, '%d', mesh.elementIds(elem));
     fprintf(fid, ' %d', mesh.elementNodeIds(elem, :));
-    if ~isempty(mesh.elementData)
-        for extra = 1:size(mesh.elementData, 2)
+    fprintf(fid, ' %.16g', labels(elem));
+    if size(mesh.elementData, 2) > 1
+        for extra = 2:size(mesh.elementData, 2)
             if ~isnan(mesh.elementData(elem, extra))
                 fprintf(fid, ' %.16g', mesh.elementData(elem, extra));
             end
         end
     end
-    fprintf(fid, ' %.16g\n', labels(elem));
+    fprintf(fid, '\n');
 end
 fprintf(fid, 'End Elements\n');
 end
